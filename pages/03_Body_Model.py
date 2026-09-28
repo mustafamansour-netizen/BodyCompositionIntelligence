@@ -10,8 +10,11 @@ other_file = st.file_uploader(
 
 if other_file:
 
-    st.success("File loaded")
-
     other_df = pd.read_csv(other_file)
 
-    st.write(other_df.head())
+    st.success("Loaded")
+
+    st.metric(
+        "Total Records",
+        len(other_df)
+    )
