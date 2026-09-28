@@ -5,10 +5,15 @@ st.set_page_config(layout="wide")
 
 st.title("📊 Current Assessment")
 
-weight_file = st.file_uploader(
-    "Upload weight.csv",
-    type=["csv"]
+if "weight_df" not in st.session_state:
+ 
+st.warning(
+"Please load files in Import page first."
 )
+ 
+st.stop()
+ 
+weight_df = st.session_state["weight_df"]
 
 if weight_file:
 
