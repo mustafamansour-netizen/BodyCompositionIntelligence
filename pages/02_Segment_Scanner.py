@@ -5,10 +5,15 @@ st.set_page_config(layout="wide")
 
 st.title("🔍 Segment Scanner")
 
-other_file = st.file_uploader(
-    "Upload other.csv",
-    type=["csv"]
+if "other_df" not in st.session_state:
+ 
+st.warning(
+"Please load files in Import page first."
 )
+ 
+st.stop()
+ 
+other_df = st.session_state["other_df"]
 
 if other_file:
 
