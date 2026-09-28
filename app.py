@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 import inspect
 
 import pandas as pd
@@ -32,7 +32,7 @@ st.markdown(
 )
 
 st.title("Withings → InBody-style Body Composition Report")
-st.caption("Build V6.2")
+st.caption("Build V7")
 st.markdown(
     "<div class='report-note'>Upload the original Withings export ZIP (recommended) or weight.csv + other.csv. "
     "The report uses the latest complete whole-body scan and the latest self-contained segmental snapshot; it never invents missing history values.</div>",
@@ -67,7 +67,7 @@ with st.sidebar:
 
     st.header("2. Profile")
     name = st.text_input("Name", value="")
-    profile_id = st.text_input("Client / Profile ID", value="", help="Optional identifier shown in the report header for quicker practitioner recognition.")
+    profile_id = st.text_input("Client / Profile ID", value="", help="Optional identifier shown in the report header.")
     sex = st.selectbox("Sex", ["Male", "Female"])
     height_cm = st.number_input("Height (cm)", min_value=120.0, max_value=220.0, value=182.0, step=0.5)
     use_dob = st.checkbox("Use date of birth", value=False)
@@ -80,6 +80,26 @@ with st.sidebar:
 
     use_goal = st.checkbox("Show personal goal", value=True)
     goal = st.number_input("Goal weight (kg)", min_value=35.0, max_value=200.0, value=82.0, step=0.5, disabled=not use_goal)
+
+    use_bf_goal = st.checkbox("Add target body fat %", value=False)
+    target_bf = st.number_input(
+        "Target body fat (%)", min_value=5.0, max_value=50.0, value=15.0, step=0.5,
+        disabled=not use_bf_goal,
+        help="Optional composition target. The report treats this as a user-defined goal, not a prescribed clinical target.",
+    )
+
+    use_journey = st.checkbox("Track journey progress", value=False)
+    if use_journey:
+        journey_start_date = st.date_input(
+            "Journey start date", value=date.today()-timedelta(days=90), min_value=date(2000,1,1), max_value=date.today()
+        )
+        starting_weight = st.number_input(
+            "Starting weight (kg)", min_value=35.0, max_value=250.0, value=95.0, step=0.1,
+            help="Used only for the progress calculation shown in the report.",
+        )
+    else:
+        journey_start_date = None
+        starting_weight = None
 
     st.markdown("#### History display")
     history_daily_rule = st.selectbox(
@@ -132,6 +152,9 @@ profile_kwargs = {
     "history_daily_rule": history_daily_rule,
     "history_points": int(history_points),
     "profile_id": profile_id or None,
+    "journey_start_date": journey_start_date,
+    "starting_weight_kg": float(starting_weight) if starting_weight is not None else None,
+    "target_body_fat_pct": float(target_bf) if use_bf_goal else None,
 }
 
 # Guard against a partial GitHub deployment where app.py was updated but
