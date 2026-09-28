@@ -32,7 +32,7 @@ st.markdown(
 )
 
 st.title("Withings → InBody-style Body Composition Report")
-st.caption("Build V5.1")
+st.caption("Build V6")
 st.markdown(
     "<div class='report-note'>Upload the original Withings export ZIP (recommended) or weight.csv + other.csv. "
     "The report uses the latest complete whole-body scan and the latest self-contained segmental snapshot; it never invents missing history values.</div>",
@@ -67,6 +67,7 @@ with st.sidebar:
 
     st.header("2. Profile")
     name = st.text_input("Name", value="")
+    profile_id = st.text_input("Client / Profile ID", value="", help="Optional identifier shown in the report header for quicker practitioner recognition.")
     sex = st.selectbox("Sex", ["Male", "Female"])
     height_cm = st.number_input("Height (cm)", min_value=120.0, max_value=220.0, value=182.0, step=0.5)
     use_dob = st.checkbox("Use date of birth", value=False)
@@ -130,6 +131,7 @@ profile_kwargs = {
     "goal_weight_kg": float(goal) if use_goal else None,
     "history_daily_rule": history_daily_rule,
     "history_points": int(history_points),
+    "profile_id": profile_id or None,
 }
 
 # Guard against a partial GitHub deployment where app.py was updated but
@@ -176,7 +178,7 @@ with st.expander("Data diagnostics", expanded=False):
     st.caption("If a Withings export changes a metric label, this list makes the mismatch visible instead of silently inventing a value.")
 
 st.subheader("Report preview")
-components.html(html, height=1600, scrolling=True)
+components.html(html, height=1750, scrolling=True)
 
 st.subheader("Download")
 col_a, col_b = st.columns(2)

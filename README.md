@@ -1,41 +1,52 @@
-# Body Composition Intelligence V5.1
+# Body Composition Intelligence — V6
 
-V5.1 is a small deployment-hardening update to V5. It adds an explicit guard for the common case where GitHub/Streamlit has a new `app.py` but an older `report_engine.py`. Instead of a redacted TypeError, the app now shows a clear version-mismatch message.
+Streamlit app that imports a Withings export ZIP (or `weight.csv` + `other.csv`) and produces a practitioner-friendly, one-page body-composition report.
 
-**Important:** upload `app.py` and `report_engine.py` from the same package and commit them together.
+## V6 highlights
 
-# Body Composition Intelligence — v5
+- Stronger patient identity in the header, including optional **Client / Profile ID**.
+- KPI cards now show movement versus the **previous measured day**.
+- New **Practitioner Snapshot** row summarizing:
+  - change since previous measured day,
+  - position versus the 30-day median,
+  - distance to the profile goal,
+  - body-fat / muscle / BMI / visceral-fat reference status.
+- Headline values always use the **latest complete whole-body scan**.
+- “Previous measured day” uses the selected daily history rule (Earliest / Latest / Daily median), and deliberately ignores same-day repeats for the comparison.
+- Segmental muscle and fat analysis retains separate male/female silhouettes and real Withings regional values.
+- Body Composition History now uses the full report width and shows a period change for Weight, Muscle Mass and Body Fat %.
+- New **Change Summary** panel: current versus previous measured day and current versus 30-day median.
+- Reworked **Goal & Interpretation** panel with a Current → Goal visual, projected body fat at goal, current assessment and reference math.
+- More compact scan-parameter panel and better use of A4 space while keeping the report on one page.
+- No proprietary InBody Score or SMM is invented. Withings Muscle Mass remains clearly labelled as Withings total muscle mass.
 
-Streamlit app that imports a Withings export ZIP (or `weight.csv` + `other.csv`) and builds a printable one-page InBody-style body-composition report without inventing proprietary InBody metrics.
+## History rules
 
-## v5 changes
+In the Streamlit profile, choose one value per measured day:
 
-- Replaced the assembled/cartoon body with a continuous male/female front-facing silhouette derived from the clean reference supplied for this iteration.
-- The silhouette switches automatically with the profile sex.
-- Segmental Muscle and Segmental Fat remain separate panels, with the five regional values around the body.
-- Added **Daily history reading** to the profile:
-  - Earliest complete scan
-  - Latest complete scan
-  - Daily median
-- Added **History points shown**: 6 / 8 / 10 / 12 measured days.
-- The daily-history setting affects only the recent InBody-style history graph.
-- The 12-month monthly medians still use **all complete scans**, remain gap-aware, and are never interpolated.
-- Headline metrics still always use the latest complete whole-body scan, independently of the selected history rule.
-- Profile-driven goal weight remains fully editable and updates the projection automatically.
+- **Earliest complete scan** (default)
+- **Latest complete scan**
+- **Daily median**
 
-## Recommended history default
+This setting affects the recent history display and the “previous measured day” comparison. The 12-month monthly medians are still calculated from **all complete scans**, remain gap-aware, and are never interpolated.
 
-`Earliest complete scan` is the default because a consistent morning BIA measurement is often the most repeatable setup. If your personal routine is different, choose the rule that matches how you measure.
+## PDF export on Streamlit Community Cloud
 
-## Run
+`requirements.txt` includes WeasyPrint. `packages.txt` lists the Debian system libraries commonly required by WeasyPrint on Streamlit Community Cloud. Commit both files to the repository root and reboot the app after dependency changes.
+
+## Run locally
 
 ```bash
+python -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Notes
+## Tests
 
-- Withings Muscle Mass is total muscle mass, not InBody Skeletal Muscle Mass (SMM).
-- No proprietary InBody Score is calculated.
-- Segmental values are Withings regional muscle/fat outputs; the report does not invent segment reference percentages.
+```bash
+pytest -q
+```
+
+The V6 package currently passes 6 tests covering core values, daily-history rules, patient identity, previous-day comparison and practitioner-facing change summaries.

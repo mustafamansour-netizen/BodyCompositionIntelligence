@@ -85,9 +85,39 @@ def test_daily_median_rule_and_point_count():
     assert r.diagnostics["history_points"]==6
 
 
+
+def test_v6_practitioner_identity_and_change_summary():
+    w,o,meta=synthetic_frames()
+    p=Profile(
+        "Mustafa Mansour","Male",1.82,date(1982,10,20),None,82.0,
+        "Earliest complete scan",8,"MUS-001"
+    )
+    r=build_report_data(w,o,p,diagnostics=meta)
+    assert r.diagnostics["previous_scan_date"].strftime("%Y-%m-%d")=="2026-09-21"
+    assert r.diagnostics["previous_weight_kg"]==92.6
+    assert r.diagnostics["median30_scan_count"]==7
+    html=render_report_html(r)
+    assert "Mustafa Mansour" in html
+    assert "ID MUS-001" in html
+    assert "CHANGE SUMMARY" in html
+    assert "Since previous measured day" in html
+    assert "9.94 kg to goal" in html
+
+
+def test_previous_day_respects_selected_history_rule():
+    w,o,meta=synthetic_frames()
+    # Latest daily rule still compares the current headline scan against the
+    # representative reading from the previous calendar day, not a same-day repeat.
+    p=Profile("Mustafa","Male",1.82,date(1982,10,20),None,82.0,"Latest complete scan",8)
+    r=build_report_data(w,o,p,diagnostics=meta)
+    assert r.diagnostics["previous_scan_date"].strftime("%Y-%m-%d")=="2026-09-21"
+    assert r.diagnostics["previous_weight_kg"]==92.6
+
 if __name__ == '__main__':
     test_core_numbers_and_silhouette()
     test_earliest_daily_rule_is_default()
     test_latest_daily_rule()
     test_daily_median_rule_and_point_count()
+    test_v6_practitioner_identity_and_change_summary()
+    test_previous_day_respects_selected_history_rule()
     print('OK')

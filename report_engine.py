@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 
-ENGINE_BUILD = "V5.1"
+ENGINE_BUILD = "V6"
 
 # -----------------------------
 # Data model
@@ -30,6 +30,7 @@ class Profile:
     goal_weight_kg: Optional[float] = None
     history_daily_rule: str = "Earliest complete scan"
     history_points: int = 8
+    profile_id: Optional[str] = None
 
 
 @dataclass
@@ -446,7 +447,45 @@ def build_report_data(
     history["Body fat %"] = history["Fat mass (kg)"] / history["Weight (kg)"] * 100
     monthly = _monthly_history(complete, scan_date)
 
+    # Comparisons for practitioner-facing summaries.  Use the previous measured
+    # calendar day (under the selected daily rule) rather than another same-day
+    # repeat, because it is more useful for follow-up review.
+    previous_days = daily[daily["Date"].dt.floor("D") < scan_date.floor("D")].sort_values("Date")
+    previous = previous_days.iloc[-1] if not previous_days.empty else None
+    last30 = complete[complete["Date"] >= scan_date - pd.Timedelta(days=30)].copy()
+    last30 = last30[last30["Date"] <= scan_date]
+    last30_bf = last30["Fat mass (kg)"] / last30["Weight (kg)"] * 100 if not last30.empty else pd.Series(dtype=float)
+
     diag = dict(diagnostics or {})
+    if previous is not None:
+        prev_weight = float(previous["Weight (kg)"])
+        prev_fat_mass = float(previous["Fat mass (kg)"])
+        prev_muscle = float(previous["Muscle mass (kg)"])
+        prev_bf = prev_fat_mass / prev_weight * 100
+        diag.update({
+            "previous_scan_date": pd.Timestamp(previous["Date"]),
+            "previous_weight_kg": prev_weight,
+            "previous_fat_mass_kg": prev_fat_mass,
+            "previous_muscle_mass_kg": prev_muscle,
+            "previous_body_fat_pct": prev_bf,
+        })
+    if not last30.empty:
+        diag.update({
+            "median30_weight_kg": float(last30["Weight (kg)"].median()),
+            "median30_fat_mass_kg": float(last30["Fat mass (kg)"].median()),
+            "median30_muscle_mass_kg": float(last30["Muscle mass (kg)"].median()),
+            "median30_body_fat_pct": float(last30_bf.median()),
+            "median30_scan_count": int(len(last30)),
+        })
+
+    # Previous visceral-fat reading, when Withings exported one.
+    vf = other_df.copy()
+    vf = vf[vf["type"].map(_metric_kind).eq("visceral_fat") & vf["value_numeric"].notna()]
+    vf = vf[vf["date"] <= scan_date + pd.Timedelta(hours=18)].sort_values("date")
+    if len(vf) >= 2:
+        diag["previous_visceral_fat"] = float(vf.iloc[-2]["value_numeric"])
+        diag["previous_visceral_date"] = pd.Timestamp(vf.iloc[-2]["date"])
+
     diag.update(seg_diag)
     diag["complete_scans"] = int(len(complete))
     diag["latest_complete_scan"] = scan_date
@@ -663,35 +702,47 @@ def _history_track(values: List[float], color: str = "#1c3f52", width: int = 360
     </svg>"""
 
 
+
 def _history_panel(data: ReportData) -> str:
     h = data.history.copy().sort_values("Date")
     if h.empty:
         return "<div class='history-empty'>No complete scan history.</div>"
-    # build_report_data already reduces multiple same-day measurements according to
-    # the profile-selected daily rule. Keep the configured number of measured days.
     h = h.tail(int(max(3, min(16, data.profile.history_points or 8))))
-    dates=[pd.Timestamp(d).strftime('%d %b') for d in h['Date']]
-    weights=[float(v) for v in h['Weight (kg)']]
-    muscle=[float(v) for v in h['Muscle mass (kg)']]
-    fat=[float(v) for v in h['Body fat %']]
+    dates = [pd.Timestamp(d).strftime("%d %b") for d in h["Date"]]
+    weights = [float(v) for v in h["Weight (kg)"]]
+    muscle = [float(v) for v in h["Muscle mass (kg)"]]
+    fat = [float(v) for v in h["Body fat %"]]
 
     def latest_monthly(col, suffix):
-        vals=[float(v) for v in data.monthly[col].tolist() if not pd.isna(v)]
-        return (f"{vals[-1]:.1f}{suffix}" if vals else "-")
+        vals = [float(v) for v in data.monthly[col].tolist() if not pd.isna(v)]
+        return f"{vals[-1]:.1f}{suffix}" if vals else "-"
 
-    def row(label, sublabel, vals, median_text):
+    def delta_text(vals, suffix):
+        if len(vals) < 2:
+            return "-"
+        d = vals[-1] - vals[0]
+        arrow = "↑" if d > 0 else ("↓" if d < 0 else "→")
+        return f"{arrow} {abs(d):.1f}{suffix}"
+
+    def row(label, sublabel, vals, median_text, suffix):
         return f"""<div class='ih-row'>
-          <div class='ih-label'><b>{label}</b><span>{sublabel}</span><small>Latest monthly median<br><strong>{median_text}</strong></small></div>
-          <div class='ih-plot'>{_history_track(vals)}</div>
+          <div class='ih-label'>
+            <b>{label}</b><span>{sublabel}</span>
+            <small>Monthly median<br><strong>{median_text}</strong></small>
+          </div>
+          <div class='ih-plot'>{_history_track(vals, width=520, height=104)}</div>
+          <div class='ih-change'><span>PERIOD Δ</span><b>{delta_text(vals, suffix)}</b><small>{dates[0]} → {dates[-1]}</small></div>
         </div>"""
 
-    date_cells=''.join(f"<span><b>{d.split()[0]}</b><small>{d.split()[1]}</small></span>" for d in dates)
+    date_cells = "".join(
+        f"<span><b>{d.split()[0]}</b><small>{d.split()[1]}</small></span>" for d in dates
+    )
     return f"""<div class='ih-wrap'>
-        {row('Weight','kg',weights,latest_monthly('Weight (kg)',' kg'))}
-        {row('Muscle Mass','kg',muscle,latest_monthly('Muscle mass (kg)',' kg'))}
-        {row('Body Fat','%',fat,latest_monthly('Body fat %','%'))}
-        <div class='ih-dates'><div></div><div class='ih-date-grid' style='grid-template-columns:repeat({len(dates)},1fr)'>{date_cells}</div></div>
-        <div class='ih-note'>{escape(data.profile.history_daily_rule)} for each of the most recent {len(dates)} measured days. Monthly medians use all complete scans, remain gap-aware, and are not interpolated.</div>
+        {row('Weight','kg',weights,latest_monthly('Weight (kg)',' kg'),' kg')}
+        {row('Muscle Mass','kg',muscle,latest_monthly('Muscle mass (kg)',' kg'),' kg')}
+        {row('Body Fat','%',fat,latest_monthly('Body fat %','%'),' pp')}
+        <div class='ih-dates'><div></div><div class='ih-date-grid' style='grid-template-columns:repeat({len(dates)},1fr)'>{date_cells}</div><div></div></div>
+        <div class='ih-note'>{escape(data.profile.history_daily_rule)} per measured day · {len(dates)} days shown · monthly medians use all complete scans and remain gap-aware.</div>
       </div>"""
 
 
@@ -708,11 +759,13 @@ def _segment_card(title: str, seg: SegmentValue) -> str:
       </div>"""
 
 
+
 def render_report_html(data: ReportData, standalone: bool = True) -> str:
     age = age_on(data.profile, data.scan_date)
     age_text = str(age) if age is not None else "-"
     sex = data.profile.sex.title()
     name = data.profile.name.strip() or "Profile"
+    profile_id = (data.profile.profile_id or "").strip()
 
     bf_status, bf_cls = _status(data.body_fat_pct, data.bands.body_fat)
     mm_status, mm_cls = _status(data.muscle_pct, data.bands.muscle_pct)
@@ -721,58 +774,28 @@ def render_report_html(data: ReportData, standalone: bool = True) -> str:
     vis_status, vis_cls = _visceral_status(data.visceral_fat, data.bands.visceral_fat)
     weight_cls = bmi_cls
 
+    # Slightly more practitioner-friendly wording while keeping the underlying
+    # reference logic unchanged.
+    def display_status(label: str, cls: str, kind: str = "") -> str:
+        mapping = {
+            "Within ref.": "Within reference",
+            "Above ref.": "Above reference",
+            "Below ref.": "Below reference",
+            "Just above": "Just above reference",
+            "Just below": "Just below reference",
+            "Above normal": "Above BMI reference" if kind == "bmi" else "Above reference",
+            "Below normal": "Below BMI reference" if kind == "bmi" else "Below reference",
+        }
+        return mapping.get(label, label)
+
+    bf_status_d = display_status(bf_status, bf_cls)
+    mm_status_d = display_status(mm_status, mm_cls)
+    water_status_d = display_status(water_status, water_cls)
+    bmi_status_d = display_status(bmi_status, bmi_cls, "bmi")
+    vis_status_d = display_status(vis_status, vis_cls)
+
     bmi_lo_w = data.bands.bmi[0] * data.profile.height_m ** 2
     bmi_hi_w = data.bands.bmi[1] * data.profile.height_m ** 2
-
-    seg = data.segments
-    la, ra = seg.get("Left Arm", SegmentValue()), seg.get("Right Arm", SegmentValue())
-    ll, rl = seg.get("Left Leg", SegmentValue()), seg.get("Right Leg", SegmentValue())
-    torso = seg.get("Torso", SegmentValue())
-    arm_diff = _balance(la.muscle_kg, ra.muscle_kg)
-    leg_diff = _balance(ll.muscle_kg, rl.muscle_kg)
-
-    goal = data.profile.goal_weight_kg
-    if goal is not None:
-        diff = goal - data.weight_kg
-        projected_fat = goal - data.fat_free_mass_kg
-        projected_pct = projected_fat / goal * 100 if goal > 0 else None
-        projection_valid = projected_fat >= 0
-        goal_html = f"""
-        <div class='small-label'>PERSONAL GOAL</div>
-        <div class='goal-number'>{goal:.1f} kg</div>
-        <div class='goal-line'>Current weight: {data.weight_kg:.2f} kg <b class='goal-delta'>{diff:+.2f} kg</b></div>
-        <div class='goal-proj'>{('~'+format(projected_pct,'.1f')+'% body fat at '+format(goal,'.1f')+' kg') if projection_valid else 'Goal is below current fat-free mass'}</div>
-        <div class='note'>Assuming fat-free mass is maintained. This is a mathematical projection, not a personal target.</div>
-        """
-        math_rows = f"""
-        <div class='math-row'><span>Current weight</span><b>{data.weight_kg:.2f} kg</b></div>
-        <div class='math-row'><span>Current fat mass</span><b>{data.fat_mass_kg:.2f} kg</b></div>
-        <div class='math-row'><span>Current fat-free mass</span><b>{data.fat_free_mass_kg:.2f} kg</b></div>
-        <div class='math-row'><span>Target weight</span><b>{goal:.1f} kg</b></div>
-        <div class='math-row'><span>Projected fat mass at target</span><b>{projected_fat:.2f} kg</b></div>
-        <div class='math-row'><span>Projected body fat %</span><b>{projected_pct:.1f}%</b></div>
-        """ if projection_valid else f"""
-        <div class='math-row'><span>Current weight</span><b>{data.weight_kg:.2f} kg</b></div>
-        <div class='math-row'><span>Current fat-free mass</span><b>{data.fat_free_mass_kg:.2f} kg</b></div>
-        <div class='math-row'><span>Target weight</span><b>{goal:.1f} kg</b></div>
-        <div class='note warn-text'>Projection suppressed because target weight is below current fat-free mass.</div>
-        """
-    else:
-        threshold = data.bands.bmi[1] * data.profile.height_m ** 2
-        diff = threshold - data.weight_kg
-        goal_html = f"""
-        <div class='small-label'>PERSONAL GOAL</div>
-        <div class='goal-number muted'>Not supplied</div>
-        <div class='goal-line'>BMI {data.bands.bmi[1]:.1f} reference threshold:</div>
-        <div class='goal-proj'>{threshold:.2f} kg <b class='goal-delta'>{diff:+.2f} kg</b></div>
-        <div class='note'>Reference boundary, not a personal target.</div>
-        """
-        math_rows = f"""
-        <div class='math-row'><span>Current weight</span><b>{data.weight_kg:.2f} kg</b></div>
-        <div class='math-row'><span>Current fat mass</span><b>{data.fat_mass_kg:.2f} kg</b></div>
-        <div class='math-row'><span>Current fat-free mass</span><b>{data.fat_free_mass_kg:.2f} kg</b></div>
-        <div class='math-row'><span>BMI {data.bands.bmi[1]:.1f} weight</span><b>{threshold:.2f} kg</b></div>
-        """
 
     scan_date = data.scan_date.strftime("%d %b %Y")
     scan_time = data.scan_date.strftime("%H:%M")
@@ -786,132 +809,270 @@ def render_report_html(data: ReportData, standalone: bool = True) -> str:
     ecw = fmt_num(data.ecw_kg, 0, " kg")
     ecw_tbw = fmt_num(data.ecw_tbw_pct, 1, "%*")
 
+    diag = data.diagnostics or {}
+
+    def signed(value: Optional[float], decimals: int = 1, suffix: str = "") -> str:
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            return "-"
+        if abs(float(value)) < 0.00001:
+            return f"→ 0.{''.join(['0']*decimals)}{suffix}" if decimals else f"→ 0{suffix}"
+        arrow = "↑" if value > 0 else "↓"
+        return f"{arrow} {abs(value):.{decimals}f}{suffix}"
+
+    prev_w = diag.get("previous_weight_kg")
+    prev_fm = diag.get("previous_fat_mass_kg")
+    prev_mm = diag.get("previous_muscle_mass_kg")
+    prev_bf = diag.get("previous_body_fat_pct")
+    d_w = data.weight_kg - prev_w if prev_w is not None else None
+    d_fm = data.fat_mass_kg - prev_fm if prev_fm is not None else None
+    d_mm = data.muscle_mass_kg - prev_mm if prev_mm is not None else None
+    d_bf = data.body_fat_pct - prev_bf if prev_bf is not None else None
+    prev_date_obj = diag.get("previous_scan_date")
+    prev_date = pd.Timestamp(prev_date_obj).strftime("%d %b %Y") if prev_date_obj is not None else "-"
+
+    med_w = diag.get("median30_weight_kg")
+    med_fm = diag.get("median30_fat_mass_kg")
+    med_mm = diag.get("median30_muscle_mass_kg")
+    med_bf = diag.get("median30_body_fat_pct")
+    m_w = data.weight_kg - med_w if med_w is not None else None
+    m_fm = data.fat_mass_kg - med_fm if med_fm is not None else None
+    m_mm = data.muscle_mass_kg - med_mm if med_mm is not None else None
+    m_bf = data.body_fat_pct - med_bf if med_bf is not None else None
+
+    prev_vis = diag.get("previous_visceral_fat")
+    d_vis = data.visceral_fat - prev_vis if (data.visceral_fat is not None and prev_vis is not None) else None
+
+    goal = data.profile.goal_weight_kg
+    if goal is not None:
+        goal_gap = data.weight_kg - goal
+        projected_fat = goal - data.fat_free_mass_kg
+        projected_pct = projected_fat / goal * 100 if goal > 0 else None
+        projection_valid = projected_fat >= 0
+        goal_summary = f"{abs(goal_gap):.2f} kg to goal"
+        goal_distance_html = f"""
+          <div class='goal-distance'>
+            <div class='goal-end'><b>{goal:.1f}</b><span>Goal kg</span></div>
+            <div class='goal-arrow'><span></span><i>Current → Goal</i></div>
+            <div class='goal-end current'><b>{data.weight_kg:.1f}</b><span>Current kg</span></div>
+          </div>
+        """
+        goal_projection = (
+            f"<div class='goal-proj'>Projected body fat at goal <b>{projected_pct:.1f}%</b></div>"
+            if projection_valid
+            else "<div class='goal-proj warn-text'>Goal is below current fat-free mass</div>"
+        )
+        math_rows = f"""
+          <div class='math-row'><span>Current fat mass</span><b>{data.fat_mass_kg:.2f} kg</b></div>
+          <div class='math-row'><span>Current fat-free mass</span><b>{data.fat_free_mass_kg:.2f} kg</b></div>
+          <div class='math-row'><span>Projected fat mass at goal</span><b>{projected_fat:.2f} kg</b></div>
+        """ if projection_valid else f"""
+          <div class='math-row'><span>Current fat-free mass</span><b>{data.fat_free_mass_kg:.2f} kg</b></div>
+          <div class='note warn-text'>Projection suppressed because target weight is below current fat-free mass.</div>
+        """
+    else:
+        threshold = data.bands.bmi[1] * data.profile.height_m ** 2
+        goal_summary = "No personal goal"
+        goal_distance_html = f"""
+          <div class='goal-distance'>
+            <div class='goal-end'><b>{threshold:.1f}</b><span>BMI {data.bands.bmi[1]:.1f} kg</span></div>
+            <div class='goal-arrow'><span></span><i>Reference boundary</i></div>
+            <div class='goal-end current'><b>{data.weight_kg:.1f}</b><span>Current kg</span></div>
+          </div>
+        """
+        goal_projection = "<div class='goal-proj'>Reference boundary shown; not a personal target.</div>"
+        math_rows = f"""
+          <div class='math-row'><span>Current fat mass</span><b>{data.fat_mass_kg:.2f} kg</b></div>
+          <div class='math-row'><span>Current fat-free mass</span><b>{data.fat_free_mass_kg:.2f} kg</b></div>
+        """
+
+    id_line = f"<span class='patient-id'>ID {escape(profile_id)}</span>" if profile_id else ""
+
+    kpi_delta_weight = signed(d_w, 2, " kg") if d_w is not None else "No prior day"
+    kpi_delta_bf = signed(d_bf, 1, " pp") if d_bf is not None else "No prior day"
+    kpi_delta_mm = signed(d_mm, 2, " kg") if d_mm is not None else "No prior day"
+    kpi_delta_vis = signed(d_vis, 1, "") if d_vis is not None else "Ref 0–5"
+
+    snapshot_goal = goal_summary if goal is not None else f"BMI {data.bands.bmi[1]:.1f} boundary"
+    snapshot_ref = f"BF {bf_status_d} · Muscle {mm_status_d}"
+    snapshot_prev = f"{signed(d_w,2,' kg')} · BF {signed(d_bf,1,' pp')}" if d_w is not None else "No prior measured day"
+    snapshot_30 = f"Wt {signed(m_w,1,' kg')} · BF {signed(m_bf,1,' pp')}" if m_w is not None else "Insufficient data"
+
     html = f"""<!doctype html>
 <html><head><meta charset='utf-8'><style>
-@page {{ size: A4 portrait; margin: 0; }}
-* {{ box-sizing: border-box; }}
-html,body {{ margin:0; padding:0; background:#eef3f6; font-family: Arial, Helvetica, sans-serif; color:#12466b; }}
-.report-page {{ width:210mm; height:297mm; margin:0 auto; background:#fff; padding:0; overflow:hidden; position:relative; }}
-.header {{ height:27mm; background:#09557f; color:#fff; padding:4.8mm 6.5mm 3mm 6.5mm; display:flex; justify-content:space-between; }}
-.header h1 {{ margin:0; font-size:18pt; line-height:1; letter-spacing:.2px; }}
-.header .subtitle {{ font-size:7.4pt; margin-top:2mm; opacity:.95; }}
-.header-right {{ text-align:right; font-size:7.2pt; line-height:1.42; }}
-.header-right .date {{ font-weight:700; font-size:8.3pt; }}
-.content {{ padding:3.2mm 5.8mm 4mm; }}
-.kpis {{ display:grid; grid-template-columns:repeat(4,1fr); gap:2.2mm; margin-bottom:2.7mm; }}
-.kpi {{ border:1px solid #b8d0df; border-radius:2.3mm; padding:2mm 2.3mm 1.6mm; height:16.8mm; position:relative; background:#fff; }}
-.kpi-label {{ font-size:6.4pt; font-weight:700; color:#647b8b; }}
-.kpi-value {{ margin-top:.8mm; font-size:15.2pt; font-weight:800; color:#00578c; line-height:1; }}
-.kpi-sub {{ position:absolute; bottom:1.3mm; right:2mm; font-size:5.4pt; color:#73828c; }}
-.dot {{ width:3.4mm; height:3.4mm; border-radius:50%; position:absolute; right:2.8mm; top:7.6mm; }}
-.good {{ background:#4db66a; }} .warn {{ background:#efad2e; }} .bad {{ background:#d65c51; }} .neutral {{ background:#9aaab4; }}
-.two-col {{ display:grid; grid-template-columns:1fr 1fr; gap:2.6mm; margin-bottom:2.6mm; }}
+@page {{ size:A4 portrait; margin:0; }}
+* {{ box-sizing:border-box; }}
+html,body {{ margin:0; padding:0; background:#eef3f6; font-family:Arial,Helvetica,sans-serif; color:#164864; }}
+.report-page {{ width:210mm; height:297mm; margin:0 auto; background:#fff; position:relative; overflow:hidden; }}
+.header {{ height:23mm; background:#095c86; color:#fff; padding:3.8mm 6.2mm 3.2mm; display:grid; grid-template-columns:1.08fr 1fr; align-items:center; }}
+.header h1 {{ margin:0; font-size:17pt; line-height:1; letter-spacing:.2px; }}
+.header .subtitle {{ margin-top:1.5mm; font-size:6.8pt; opacity:.94; }}
+.patient {{ text-align:right; }}
+.patient-name {{ font-size:11.2pt; font-weight:800; letter-spacing:.15px; line-height:1.1; }}
+.patient-meta {{ margin-top:1.1mm; font-size:6.8pt; line-height:1.35; }}
+.patient-id {{ display:inline-block; margin-right:1.5mm; padding:.35mm 1.2mm; border:1px solid rgba(255,255,255,.5); border-radius:4mm; font-size:5.7pt; }}
+.scan-meta {{ margin-top:.7mm; font-size:6pt; opacity:.9; }}
+.content {{ padding:2.8mm 5.7mm 4mm; }}
+
 .card {{ border:1px solid #b8d0df; border-radius:2mm; overflow:hidden; background:#fff; }}
-.section-title {{ background:#086391; color:#fff; height:6.1mm; padding:1.2mm 2.5mm; font-size:7.5pt; font-weight:800; letter-spacing:.2px; }}
-.comp-body {{ padding:1.3mm 2.4mm 1.2mm; height:35.7mm; }}
-.comp-row {{ display:grid; grid-template-columns:1fr 31mm 24mm; align-items:center; border-bottom:1px solid #edf1f4; height:5.65mm; font-size:6.5pt; }}
-.comp-row:last-child {{ border-bottom:0; }}
-.comp-row b {{ text-align:right; font-size:7pt; color:#00578c; }}
-.comp-row small {{ text-align:right; color:#788a95; font-size:5.5pt; }}
-.bars {{ padding:1.1mm 2.4mm 1mm; height:35.7mm; }}
-.bar-row {{ display:grid; grid-template-columns:22mm 1fr 21mm; gap:2mm; align-items:center; height:6.6mm; font-size:6.4pt; }}
-.bar-label {{ font-weight:700; }} .bar-value {{ text-align:right; font-weight:800; font-size:7.2pt; color:#00578c; }}
-.bar-note {{ font-size:5.1pt; color:#7a8a94; line-height:1.05; margin-bottom:.6mm; }}
-.track {{ height:2.5mm; border-radius:2mm; background:#e6edf2; position:relative; overflow:visible; }}
-.ref-zone {{ position:absolute; top:0; bottom:0; background:#c8ead2; border-radius:2mm; }}
-.marker {{ position:absolute; top:50%; width:3.1mm; height:3.1mm; margin-left:-1.55mm; margin-top:-1.55mm; border-radius:50%; background:#075782; box-shadow:0 0 0 .45mm #fff; }}
-.segment-card {{ margin-bottom:2.6mm; }}
+.section-title {{ background:#086c9a; color:#fff; height:5.8mm; padding:1.15mm 2.5mm; font-size:7.2pt; font-weight:800; letter-spacing:.2px; }}
 .section-title.split {{ display:flex; justify-content:space-between; align-items:center; }}
-.section-title.split small {{ font-size:5pt; font-weight:600; opacity:.86; letter-spacing:0; }}
-.segment-wrap {{ height:58mm; padding:1.5mm 2.2mm 1.2mm; }}
-.segment-panels {{ display:grid; grid-template-columns:1fr 1fr; gap:2.4mm; height:53.5mm; }}
-.seg-panel {{ border:1px solid #d7e2e8; background:#f3f7f9; min-width:0; position:relative; overflow:hidden; }}
-.seg-panel.muscle {{ box-shadow:inset 0 .8mm 0 #168ac0; }}
-.seg-panel.fat {{ box-shadow:inset 0 .8mm 0 #d39a2f; }}
-.seg-panel-head {{ height:7.4mm; padding:1.45mm 2mm 1mm; background:#e8f0f4; display:flex; align-items:center; }}
-.seg-panel-head b {{ display:block; font-size:6.9pt; color:#395a6c; line-height:1; }}
-.seg-panel.muscle .seg-panel-head b {{ color:#08739e; }} .seg-panel.fat .seg-panel-head b {{ color:#9c6b17; }}
-.seg-panel-head span {{ display:block; margin-top:.7mm; font-size:4.4pt; color:#788c98; }}
-.seg-panel-body {{ height:40.7mm; display:grid; grid-template-columns:1fr 28mm 1fr; align-items:center; padding:.45mm 1.4mm 0; }}
-.seg-side {{ height:30mm; display:flex; flex-direction:column; justify-content:space-between; padding-top:3.8mm; padding-bottom:2.5mm; }}
-.seg-readout {{ color:#5f7786; line-height:1.1; }}
-.seg-readout.right {{ text-align:right; padding-right:1.2mm; }} .seg-readout.left {{ text-align:left; padding-left:1.2mm; }}
-.seg-name {{ display:block; font-size:4.4pt; font-weight:800; color:#607887; letter-spacing:.1px; }}
-.seg-readout b {{ display:block; font-size:7.4pt; margin-top:.7mm; color:#154f70; }}
-.seg-panel.muscle .seg-readout b {{ color:#08739e; }} .seg-panel.fat .seg-readout b {{ color:#9c6b17; }}
-.seg-readout small {{ display:none; }}
-.seg-figure {{ position:relative; height:40mm; display:flex; justify-content:center; align-items:flex-end; padding-top:5mm; }}
-.segment-body-svg {{ width:26.5mm; height:38.2mm; display:block; }}
-.seg-torso {{ position:absolute; top:.3mm; left:50%; transform:translateX(-50%); z-index:3; width:24mm; text-align:center; line-height:1.02; background:transparent; border:0; padding:0; }}
-.seg-torso span {{ display:block; font-size:4pt; color:#6f838e; font-weight:800; }}
-.seg-torso b {{ display:block; font-size:7.2pt; margin-top:.35mm; color:#154f70; }}
-.seg-panel.muscle .seg-torso b {{ color:#08739e; }} .seg-panel.fat .seg-torso b {{ color:#9c6b17; }}
-.seg-torso small {{ display:none; }}
-.seg-panel-foot {{ height:5.3mm; border-top:1px solid #dce6eb; padding:1.15mm 1.5mm 0; text-align:center; font-size:4.0pt; color:#6f838e; white-space:nowrap; }}
-.bottom-grid {{ display:grid; grid-template-columns:1.50fr .82fr .92fr; gap:2.2mm; }}
-.bottom-card {{ height:118mm; }}
-.history-inner {{ padding:1.3mm 1.5mm 1mm; }}
-.ih-wrap {{ width:100%; }}
-.ih-row {{ display:grid; grid-template-columns:19mm 1fr; min-height:24.2mm; border-bottom:1px solid #d9e1e6; background:#fff; }}
-.ih-label {{ background:#e5edf1; padding:2.15mm 1.2mm 1.3mm; color:#394f5a; }}
-.ih-label b {{ display:block; font-size:6.8pt; line-height:1; }}
-.ih-label span {{ display:block; font-size:4.2pt; margin-top:.5mm; color:#6f818b; }}
-.ih-label small {{ display:block; font-size:3.55pt; margin-top:1.3mm; line-height:1.2; color:#6f818b; }} .ih-label small strong {{ color:#34586c; font-weight:700; }}
-.ih-plot {{ padding:.45mm .5mm .15mm .6mm; overflow:hidden; }}
-.history-svg {{ display:block; width:100%; height:22.2mm; }}
-.history-svg .hgrid {{ stroke:#eef2f4; stroke-width:1; }} .history-svg .hbase {{ stroke:#d8e0e4; stroke-width:1; }}
-.history-svg .hval {{ fill:#2b3e48; font-size:13px; font-weight:700; font-family:Arial,Helvetica,sans-serif; }}
-.ih-dates {{ display:grid; grid-template-columns:19mm 1fr; min-height:8.4mm; }}
-.ih-date-grid {{ display:grid; align-items:start; text-align:center; color:#697d88; padding:.75mm .25mm 0 .6mm; }}
-.ih-date-grid span {{ display:block; justify-self:center; white-space:nowrap; line-height:1.05; font-size:3.7pt; }}
-.ih-date-grid b {{ display:block; font-size:4.2pt; color:#546a76; }}
-.ih-date-grid small {{ display:block; margin-top:.25mm; font-size:3.6pt; color:#7f9099; }}
-.ih-note {{ margin-top:1.1mm; padding:1.2mm 1.4mm; background:#eef4f7; font-size:4.2pt; color:#687d89; line-height:1.32; }}
-.params {{ padding:1.4mm 2.4mm; font-size:5.5pt; }}
-.param-row,.math-row {{ display:flex; justify-content:space-between; line-height:1.55; }}
-.param-row b,.math-row b {{ color:#00578c; }}
-.subbox-title {{ background:#eef5f8; color:#0d628e; font-size:5.5pt; font-weight:800; padding:1mm 1.3mm; margin:1.3mm -1mm .8mm; border-radius:1.2mm; }}
-.note-box {{ background:#eef3f6; border-radius:1.5mm; padding:1.6mm; margin-top:1.5mm; font-size:4.7pt; color:#557080; line-height:1.45; }}
-.mini-note {{ margin-top:1mm; font-size:4.1pt; color:#6a7e89; line-height:1.3; }}
-.goal-inner {{ padding:1.5mm 2.5mm; font-size:5.2pt; }}
-.small-label {{ font-size:5.1pt; font-weight:800; color:#607987; }}
-.goal-number {{ font-size:15pt; color:#00578c; font-weight:800; line-height:1; margin:1.5mm 0 1mm; }}
-.goal-number.muted {{ font-size:10pt; }}
-.goal-line {{ display:flex; justify-content:space-between; align-items:center; color:#607582; }}
-.goal-delta {{ color:#e67f20; margin-left:2mm; }}
-.goal-proj {{ font-size:6.5pt; font-weight:800; color:#00578c; margin-top:1.1mm; }}
-.note {{ font-size:4.6pt; color:#667a86; line-height:1.35; margin-top:1mm; }}
-.assess {{ margin-top:1.2mm; }}
-.assess-row {{ display:grid; grid-template-columns:1fr 4mm 25mm; gap:1.2mm; align-items:center; height:4.7mm; font-size:5.3pt; }}
-.assess-dot {{ width:2.5mm; height:2.5mm; border-radius:50%; }}
-.pill {{ border-radius:4mm; text-align:center; padding:.55mm 1mm; color:#31644a; background:#d8f0df; font-weight:700; font-size:4.8pt; }}
+.section-title small {{ font-size:5.3pt; font-weight:600; }}
+
+.kpis {{ display:grid; grid-template-columns:repeat(4,1fr); gap:2.1mm; margin-bottom:2mm; }}
+.kpi {{ height:17.5mm; border:1px solid #b8d0df; border-radius:2.2mm; padding:1.8mm 2.2mm; position:relative; }}
+.kpi-label {{ font-size:5.8pt; font-weight:800; color:#647b8b; }}
+.kpi-value {{ font-size:14.3pt; font-weight:800; color:#005b8e; margin-top:.55mm; line-height:1; }}
+.kpi-status {{ position:absolute; top:7.3mm; right:2.3mm; width:3.2mm; height:3.2mm; border-radius:50%; }}
+.kpi-foot {{ position:absolute; bottom:1.25mm; left:2.2mm; right:2.2mm; display:flex; justify-content:space-between; align-items:center; font-size:4.8pt; color:#6e818c; }}
+.kpi-delta {{ font-weight:800; color:#285a75; }}
+.good {{ background:#4db66a; }} .warn {{ background:#efad2e; }} .bad {{ background:#d65c51; }} .neutral {{ background:#9aaab4; }}
+
+.snapshot {{ display:grid; grid-template-columns:1.1fr 1.05fr 1fr 1.4fr; border:1px solid #c7d9e3; border-radius:2mm; margin-bottom:2mm; overflow:hidden; background:#f7fbfd; }}
+.snap-item {{ min-height:11.7mm; padding:1.4mm 2.2mm; border-right:1px solid #dce7ed; }}
+.snap-item:last-child {{ border-right:0; }}
+.snap-label {{ font-size:4.9pt; font-weight:800; color:#738794; text-transform:uppercase; letter-spacing:.2px; }}
+.snap-value {{ margin-top:.8mm; font-size:7.3pt; font-weight:800; color:#0a5e8a; line-height:1.15; }}
+.snap-sub {{ margin-top:.4mm; font-size:4.4pt; color:#6c7f89; }}
+
+.two-col {{ display:grid; grid-template-columns:1fr 1fr; gap:2.4mm; margin-bottom:2.2mm; }}
+.comp-body,.bars {{ height:32.5mm; }}
+.comp-body {{ padding:1mm 2.3mm; }}
+.comp-row {{ display:grid; grid-template-columns:1fr 30mm 23mm; align-items:center; border-bottom:1px solid #edf1f4; height:5.05mm; font-size:6.05pt; }}
+.comp-row:last-child {{ border-bottom:0; }}
+.comp-row b {{ text-align:right; color:#005b8e; font-size:6.7pt; }}
+.comp-row small {{ text-align:right; color:#7a8c96; font-size:5.1pt; }}
+.bars {{ padding:.8mm 2.3mm; }}
+.bar-row {{ display:grid; grid-template-columns:22mm 1fr 20mm; gap:1.7mm; align-items:center; height:6.0mm; font-size:6pt; }}
+.bar-label {{ font-weight:700; }} .bar-value {{ text-align:right; font-weight:800; font-size:6.8pt; color:#005b8e; }}
+.bar-note {{ font-size:4.7pt; color:#7b8d96; margin-bottom:.4mm; }}
+.track {{ height:2.3mm; border-radius:2mm; background:#e5edf2; position:relative; }}
+.ref-zone {{ position:absolute; top:0; bottom:0; background:#caead3; border-radius:2mm; }}
+.marker {{ position:absolute; top:50%; width:3mm; height:3mm; margin-left:-1.5mm; margin-top:-1.5mm; border-radius:50%; background:#075b84; box-shadow:0 0 0 .4mm #fff; }}
+
+.segment-card {{ margin-bottom:2.2mm; }}
+.segment-wrap {{ padding:1.4mm 1.7mm 1.2mm; height:52mm; }}
+.segment-panels {{ display:grid; grid-template-columns:1fr 1fr; gap:2.1mm; height:100%; }}
+.seg-panel {{ border:1px solid #cad9e2; background:#f7fafc; overflow:hidden; position:relative; }}
+.seg-panel-head {{ height:7mm; padding:1.4mm 2mm; background:#eef5f8; }}
+.seg-panel-head b {{ display:block; font-size:7pt; color:#086a97; }} .seg-panel.fat .seg-panel-head b {{ color:#9b680d; }}
+.seg-panel-head span {{ display:block; font-size:4.6pt; color:#718591; margin-top:.2mm; }}
+.seg-panel-body {{ height:36.5mm; display:grid; grid-template-columns:1fr 23mm 1fr; align-items:center; padding:0 2mm; }}
+.seg-side {{ height:100%; display:flex; flex-direction:column; justify-content:space-around; padding:5mm 0 2.5mm; }}
+.seg-readout {{ font-size:4.8pt; color:#537080; }} .seg-readout.right {{ text-align:right; }} .seg-readout.left {{ text-align:left; }}
+.seg-readout b {{ display:block; font-size:7.4pt; color:#00628f; margin-top:.3mm; }} .seg-panel.fat .seg-readout b {{ color:#a36b05; }}
+.seg-name {{ font-size:4.6pt; font-weight:800; color:#607784; }}
+.seg-figure {{ position:relative; height:100%; display:flex; align-items:flex-end; justify-content:center; padding-bottom:1.2mm; }}
+.segment-body-svg {{ width:22mm; height:34mm; display:block; }}
+.seg-torso {{ position:absolute; top:.8mm; left:50%; transform:translateX(-50%); text-align:center; z-index:2; white-space:nowrap; }}
+.seg-torso span {{ display:block; font-size:4.3pt; font-weight:800; color:#607784; }} .seg-torso b {{ font-size:7.4pt; color:#00628f; }} .seg-panel.fat .seg-torso b {{ color:#a36b05; }}
+.seg-panel-foot {{ height:5.8mm; border-top:1px solid #dbe5ea; display:flex; align-items:center; justify-content:center; font-size:4.2pt; color:#6b7e88; padding:0 1mm; }}
+
+.history-card {{ margin-bottom:2.2mm; }}
+.history-inner {{ padding:1mm 1.3mm .8mm; height:54mm; }}
+.ih-wrap {{ height:100%; }}
+.ih-row {{ display:grid; grid-template-columns:22mm 1fr 25mm; height:13.1mm; border-bottom:1px solid #e6edf1; align-items:center; }}
+.ih-label {{ height:100%; background:#edf4f7; padding:1.4mm 1.5mm; }}
+.ih-label b {{ display:block; font-size:6.5pt; color:#294f62; line-height:1.05; }}
+.ih-label span {{ display:block; font-size:4.4pt; color:#748791; }}
+.ih-label small {{ display:block; margin-top:.7mm; font-size:3.8pt; color:#70838e; line-height:1.05; }} .ih-label small strong {{ color:#355c70; }}
+.ih-plot {{ padding:.1mm .5mm; overflow:hidden; }}
+.history-svg {{ width:100%; height:12.5mm; display:block; }}
+.history-svg .hbase {{ stroke:#d8e0e4; stroke-width:1; }} .history-svg .hval {{ fill:#2b3e48; font-size:12px; font-weight:700; font-family:Arial,Helvetica,sans-serif; }}
+.ih-change {{ padding:1mm 1.2mm; border-left:1px solid #e4ecef; height:100%; display:flex; flex-direction:column; justify-content:center; }}
+.ih-change span {{ font-size:3.8pt; font-weight:800; color:#788a94; }} .ih-change b {{ font-size:6.4pt; color:#0a5d87; margin-top:.3mm; }} .ih-change small {{ font-size:3.6pt; color:#85939b; margin-top:.25mm; }}
+.ih-dates {{ display:grid; grid-template-columns:22mm 1fr 25mm; min-height:5.7mm; }}
+.ih-date-grid {{ display:grid; text-align:center; align-items:start; padding:.5mm .5mm 0; }}
+.ih-date-grid span {{ white-space:nowrap; line-height:1; }} .ih-date-grid b {{ display:block; font-size:3.9pt; color:#536c78; }} .ih-date-grid small {{ display:block; font-size:3.4pt; color:#82919a; }}
+.ih-note {{ margin-top:.3mm; padding:.6mm 1mm; background:#eef4f7; font-size:3.8pt; color:#6c808b; }}
+
+.bottom-grid {{ display:grid; grid-template-columns:.92fr .98fr 1.1fr; gap:2.2mm; }}
+.bottom-card {{ height:55mm; }}
+.params,.change-inner,.goal-inner {{ padding:1.25mm 2.1mm; font-size:5.25pt; }}
+.param-row,.math-row,.change-row {{ display:flex; justify-content:space-between; gap:2mm; line-height:1.48; }}
+.param-row b,.math-row b,.change-row b {{ color:#005b8e; text-align:right; }}
+.subbox-title {{ background:#edf5f8; color:#0b668f; font-size:5.25pt; font-weight:800; padding:.8mm 1.1mm; margin:1mm -.7mm .6mm; border-radius:1.1mm; }}
+.note-box {{ background:#eef3f6; border-radius:1.3mm; padding:1.1mm; margin-top:.9mm; font-size:4.15pt; color:#597180; line-height:1.3; }}
+.mini-note {{ margin-top:.7mm; font-size:3.8pt; color:#70828d; line-height:1.25; }}
+
+.change-group {{ margin-bottom:1mm; }}
+.change-head {{ display:flex; justify-content:space-between; align-items:end; margin-bottom:.7mm; }}
+.change-head b {{ font-size:5.2pt; color:#315a70; }} .change-head small {{ font-size:3.8pt; color:#81919a; }}
+.change-row {{ height:4.2mm; align-items:center; border-bottom:1px solid #eef2f4; }}
+.change-row:last-child {{ border-bottom:0; }}
+.change-row .chg {{ font-weight:800; color:#0a5d87; }}
+.change-rule {{ margin-top:.8mm; padding:.8mm 1mm; background:#f3f7f9; border-radius:1mm; color:#667b86; font-size:4pt; line-height:1.25; }}
+
+.goal-top {{ display:flex; justify-content:space-between; align-items:flex-start; }}
+.goal-number {{ font-size:14.5pt; color:#005b8e; font-weight:800; line-height:1; margin-top:.6mm; }}
+.goal-remaining {{ text-align:right; font-size:5.2pt; color:#e17b1d; font-weight:800; padding-top:2mm; }}
+.goal-distance {{ display:grid; grid-template-columns:20mm 1fr 20mm; gap:1.5mm; align-items:center; margin:1.4mm 0 1mm; }}
+.goal-end {{ text-align:left; }} .goal-end.current {{ text-align:right; }}
+.goal-end b {{ display:block; font-size:7pt; color:#0a5d87; }} .goal-end span {{ font-size:3.8pt; color:#748791; }}
+.goal-arrow {{ position:relative; height:5mm; text-align:center; }}
+.goal-arrow span {{ position:absolute; left:0; right:0; top:1.9mm; height:.8mm; background:#d7e5eb; border-radius:2mm; }}
+.goal-arrow:after {{ content:''; position:absolute; left:0; top:1.25mm; border-top:1mm solid transparent; border-bottom:1mm solid transparent; border-right:1.7mm solid #0a6c99; }}
+.goal-arrow i {{ position:relative; z-index:2; background:#fff; padding:0 .8mm; font-size:3.5pt; color:#71848f; font-style:normal; }}
+.goal-proj {{ font-size:5.7pt; color:#0b5f88; margin:.8mm 0; }} .goal-proj b {{ font-size:6.6pt; }}
+.note {{ font-size:4.05pt; color:#667b86; line-height:1.25; }}
+.assess {{ margin-top:.7mm; }}
+.assess-row {{ display:grid; grid-template-columns:1fr 3.5mm 26mm; gap:1mm; align-items:center; height:4.15mm; font-size:4.95pt; }}
+.assess-dot {{ width:2.4mm; height:2.4mm; border-radius:50%; }}
+.pill {{ border-radius:4mm; text-align:center; padding:.45mm .7mm; color:#31644a; background:#d8f0df; font-weight:700; font-size:4.1pt; }}
 .pill.warn {{ color:#8e5a06; background:#ffebc3; }} .pill.bad {{ color:#873c36; background:#f5d0cd; }} .pill.neutral {{ color:#64737d; background:#e8edef; }}
-.footer {{ position:absolute; left:6mm; right:6mm; bottom:3.2mm; display:flex; justify-content:space-between; font-size:4.1pt; color:#6f7f88; }}
-.warn-text {{ color:#a55b16; }}
+.warn-text {{ color:#a45d18; }}
+
+.footer {{ position:absolute; left:5.8mm; right:5.8mm; bottom:2.8mm; display:flex; justify-content:space-between; font-size:3.7pt; color:#70818a; }}
 </style></head><body>
 <div class='report-page'>
   <div class='header'>
-    <div><h1>BODY COMPOSITION REPORT</h1><div class='subtitle'>Withings Body Scan - InBody-style one-page analysis</div></div>
-    <div class='header-right'><div class='date'>{scan_date}&nbsp;&nbsp;{scan_time}</div><div>{escape(name)} | {escape(sex)} | Age {age_text} | Height {data.profile.height_m:.2f} m</div><div>Latest whole-body scan; segmental snapshot: {seg_date}</div></div>
+    <div>
+      <h1>BODY COMPOSITION REPORT</h1>
+      <div class='subtitle'>Withings Body Scan · practitioner-friendly one-page analysis</div>
+    </div>
+    <div class='patient'>
+      <div class='patient-name'>{escape(name)}</div>
+      <div class='patient-meta'>{id_line}{escape(sex)} · {age_text} years · {data.profile.height_m*100:.0f} cm</div>
+      <div class='scan-meta'>Scan {scan_date} · {scan_time} &nbsp; | &nbsp; Segmental {seg_date}</div>
+    </div>
   </div>
+
   <div class='content'>
     <div class='kpis'>
-      <div class='kpi'><div class='kpi-label'>WEIGHT</div><div class='kpi-value'>{data.weight_kg:.2f} kg</div><div class='dot {_dot_class(weight_cls)}'></div><div class='kpi-sub'>BMI {data.bmi:.1f}</div></div>
-      <div class='kpi'><div class='kpi-label'>BODY FAT</div><div class='kpi-value'>{data.body_fat_pct:.1f}%</div><div class='dot {_dot_class(bf_cls)}'></div><div class='kpi-sub'>{data.fat_mass_kg:.2f} kg</div></div>
-      <div class='kpi'><div class='kpi-label'>MUSCLE MASS</div><div class='kpi-value'>{data.muscle_mass_kg:.2f} kg</div><div class='dot {_dot_class(mm_cls)}'></div><div class='kpi-sub'>{data.muscle_pct:.1f}% of weight</div></div>
-      <div class='kpi'><div class='kpi-label'>VISCERAL FAT</div><div class='kpi-value'>{vis_value}</div><div class='dot {_dot_class(vis_cls)}'></div><div class='kpi-sub'>Withings index 0-20</div></div>
+      <div class='kpi'>
+        <div class='kpi-label'>WEIGHT</div><div class='kpi-value'>{data.weight_kg:.2f} kg</div><i class='kpi-status {_dot_class(weight_cls)}'></i>
+        <div class='kpi-foot'><span class='kpi-delta'>{kpi_delta_weight}</span><span>BMI {data.bmi:.1f}</span></div>
+      </div>
+      <div class='kpi'>
+        <div class='kpi-label'>BODY FAT</div><div class='kpi-value'>{data.body_fat_pct:.1f}%</div><i class='kpi-status {_dot_class(bf_cls)}'></i>
+        <div class='kpi-foot'><span class='kpi-delta'>{kpi_delta_bf}</span><span>{data.fat_mass_kg:.2f} kg</span></div>
+      </div>
+      <div class='kpi'>
+        <div class='kpi-label'>MUSCLE MASS</div><div class='kpi-value'>{data.muscle_mass_kg:.2f} kg</div><i class='kpi-status {_dot_class(mm_cls)}'></i>
+        <div class='kpi-foot'><span class='kpi-delta'>{kpi_delta_mm}</span><span>{data.muscle_pct:.1f}%</span></div>
+      </div>
+      <div class='kpi'>
+        <div class='kpi-label'>VISCERAL FAT</div><div class='kpi-value'>{vis_value}</div><i class='kpi-status {_dot_class(vis_cls)}'></i>
+        <div class='kpi-foot'><span class='kpi-delta'>{kpi_delta_vis}</span><span>{vis_status_d}</span></div>
+      </div>
+    </div>
+
+    <div class='snapshot'>
+      <div class='snap-item'><div class='snap-label'>Since previous measured day</div><div class='snap-value'>{snapshot_prev}</div><div class='snap-sub'>{prev_date}</div></div>
+      <div class='snap-item'><div class='snap-label'>Vs 30-day median</div><div class='snap-value'>{snapshot_30}</div><div class='snap-sub'>{diag.get('median30_scan_count',0)} complete scans</div></div>
+      <div class='snap-item'><div class='snap-label'>Goal position</div><div class='snap-value'>{snapshot_goal}</div><div class='snap-sub'>Profile-driven target</div></div>
+      <div class='snap-item'><div class='snap-label'>Reference snapshot</div><div class='snap-value'>{snapshot_ref}</div><div class='snap-sub'>BMI: {bmi_status_d} · Visceral: {vis_status_d}</div></div>
     </div>
 
     <div class='two-col'>
       <div class='card'><div class='section-title'>BODY COMPOSITION ANALYSIS</div><div class='comp-body'>
         <div class='comp-row'><span>Total Body Water</span><b>{data.water_kg:.2f} kg</b><small>{data.water_pct:.1f}%</small></div>
-        <div class='comp-row'><span>Fat-Free Mass</span><b>{data.fat_free_mass_kg:.2f} kg</b><small>Weight - fat mass</small></div>
+        <div class='comp-row'><span>Fat-Free Mass</span><b>{data.fat_free_mass_kg:.2f} kg</b><small>Weight − fat mass</small></div>
         <div class='comp-row'><span>Muscle Mass</span><b>{data.muscle_mass_kg:.2f} kg</b><small>{data.muscle_pct:.1f}%</small></div>
         <div class='comp-row'><span>Bone Mass</span><b>{data.bone_mass_kg:.2f} kg</b><small>{data.bone_pct:.1f}%</small></div>
         <div class='comp-row'><span>Body Fat Mass</span><b>{data.fat_mass_kg:.2f} kg</b><small>{data.body_fat_pct:.1f}%</small></div>
         <div class='comp-row'><span>Weight</span><b>{data.weight_kg:.2f} kg</b><small>BMI {data.bmi:.1f}</small></div>
       </div></div>
-      <div class='card'><div class='section-title'>MUSCLE - FAT / OBESITY ANALYSIS</div><div class='bars'>
+      <div class='card'><div class='section-title'>MUSCLE · FAT / OBESITY ANALYSIS</div><div class='bars'>
         {_bar(data.weight_kg,(bmi_lo_w,bmi_hi_w),(max(35,bmi_lo_w*0.65), bmi_hi_w*1.45),'Weight')}
         {_bar(data.muscle_pct,data.bands.muscle_pct,(45,95),'Muscle %')}
         {_bar(data.body_fat_pct,data.bands.body_fat,(5,45),'Body fat %')}
@@ -920,57 +1081,74 @@ html,body {{ margin:0; padding:0; background:#eef3f6; font-family: Arial, Helvet
       </div></div>
     </div>
 
-    <div class='card segment-card'><div class='section-title split'><span>SEGMENTAL ANALYSIS</span><small>Latest segmental scan: {seg_date}</small></div><div class='segment-wrap'>
-      <div class='segment-panels'>
+    <div class='card segment-card'>
+      <div class='section-title split'><span>SEGMENTAL ANALYSIS</span><small>Latest segmental scan: {seg_date}</small></div>
+      <div class='segment-wrap'><div class='segment-panels'>
         {_segment_analysis_panel(data, 'muscle')}
         {_segment_analysis_panel(data, 'fat')}
-      </div>
-    </div></div>
+      </div></div>
+    </div>
+
+    <div class='card history-card'>
+      <div class='section-title split'><span>BODY COMPOSITION HISTORY</span><small>Recent measured days · selected rule: {escape(data.profile.history_daily_rule)}</small></div>
+      <div class='history-inner'>{_history_panel(data)}</div>
+    </div>
 
     <div class='bottom-grid'>
-      <div class='card bottom-card'><div class='section-title'>BODY COMPOSITION HISTORY</div><div class='history-inner'>
-        {_history_panel(data)}
-      </div></div>
-
       <div class='card bottom-card'><div class='section-title'>BODY SCAN PARAMETERS</div><div class='params'>
         <div class='param-row'><span>BMR</span><b>{bmr_value}</b></div>
         <div class='param-row'><span>Metabolic age</span><b>{meta_age}</b></div>
         <div class='param-row'><span>Vascular age</span><b>{vasc_age}</b></div>
-        <div class='param-row'><span>ICW</span><b>{icw}</b></div>
-        <div class='param-row'><span>ECW</span><b>{ecw}</b></div>
+        <div class='param-row'><span>ICW / ECW</span><b>{icw} / {ecw}</b></div>
         <div class='param-row'><span>ECW/TBW</span><b>{ecw_tbw}</b></div>
         <div class='param-row'><span>Visceral fat</span><b>{vis_value} / 20</b></div>
         <div class='subbox-title'>REFERENCE BANDS</div>
-        <div class='param-row'><span>Body fat</span><b>{data.bands.body_fat[0]:g}-{data.bands.body_fat[1]:g}%</b></div>
-        <div class='param-row'><span>Muscle</span><b>{data.bands.muscle_pct[0]:g}-{data.bands.muscle_pct[1]:g}%</b></div>
-        <div class='param-row'><span>Body water</span><b>{data.bands.water_pct[0]:g}-{data.bands.water_pct[1]:g}%</b></div>
-        <div class='param-row'><span>Bone mass</span><b>{data.bands.bone_pct[0]:g}-{data.bands.bone_pct[1]:g}%</b></div>
-        <div class='param-row'><span>Visceral fat</span><b>{data.bands.visceral_fat[0]:g}-{data.bands.visceral_fat[1]:g}</b></div>
-        <div class='param-row'><span>BMI</span><b>{data.bands.bmi[0]:g}-{data.bands.bmi[1]:g}</b></div>
-        <div class='note-box'><b>BIA consistency note</b><br>Use same time / hydration conditions.<br>Short-term shifts can be measurement noise.<br>Trend is more useful than one reading.<br>* ECW/TBW uses rounded ICW/ECW export values.</div>
-        <div class='subbox-title'>SCAN DATA</div>
-        <div class='param-row'><span>Whole-body</span><b>{scan_date} {scan_time}</b></div>
-        <div class='param-row'><span>Segmental</span><b>{seg_date}</b></div>
-        <div class='param-row'><span>Complete scans</span><b>{data.diagnostics.get('complete_scans','-')}</b></div>
-        <div class='mini-note'>Muscle Mass is Withings total muscle mass, not InBody SMM.</div>
+        <div class='param-row'><span>Body fat</span><b>{data.bands.body_fat[0]:g}–{data.bands.body_fat[1]:g}%</b></div>
+        <div class='param-row'><span>Muscle</span><b>{data.bands.muscle_pct[0]:g}–{data.bands.muscle_pct[1]:g}%</b></div>
+        <div class='param-row'><span>Body water</span><b>{data.bands.water_pct[0]:g}–{data.bands.water_pct[1]:g}%</b></div>
+        <div class='param-row'><span>BMI</span><b>{data.bands.bmi[0]:g}–{data.bands.bmi[1]:g}</b></div>
+        <div class='note-box'><b>BIA consistency</b><br>Compare measurements under similar time and hydration conditions. Short-term shifts may reflect BIA variability.</div>
+      </div></div>
+
+      <div class='card bottom-card'><div class='section-title'>CHANGE SUMMARY</div><div class='change-inner'>
+        <div class='change-group'>
+          <div class='change-head'><b>VS PREVIOUS MEASURED DAY</b><small>{prev_date}</small></div>
+          <div class='change-row'><span>Weight</span><b class='chg'>{signed(d_w,2,' kg')}</b></div>
+          <div class='change-row'><span>Body fat</span><b class='chg'>{signed(d_bf,1,' pp')}</b></div>
+          <div class='change-row'><span>Fat mass</span><b class='chg'>{signed(d_fm,2,' kg')}</b></div>
+          <div class='change-row'><span>Muscle mass</span><b class='chg'>{signed(d_mm,2,' kg')}</b></div>
+        </div>
+        <div class='subbox-title'>VS 30-DAY MEDIAN</div>
+        <div class='change-row'><span>Weight</span><b class='chg'>{signed(m_w,2,' kg')}</b></div>
+        <div class='change-row'><span>Body fat</span><b class='chg'>{signed(m_bf,1,' pp')}</b></div>
+        <div class='change-row'><span>Fat mass</span><b class='chg'>{signed(m_fm,2,' kg')}</b></div>
+        <div class='change-row'><span>Muscle mass</span><b class='chg'>{signed(m_mm,2,' kg')}</b></div>
+        <div class='change-rule'>The headline scan always uses the latest complete whole-body reading. “Previous measured day” uses the profile-selected daily history rule.</div>
       </div></div>
 
       <div class='card bottom-card'><div class='section-title'>GOAL & INTERPRETATION</div><div class='goal-inner'>
-        {goal_html}
+        <div class='goal-top'><div><div class='snap-label'>PERSONAL GOAL</div><div class='goal-number'>{f'{goal:.1f} kg' if goal is not None else 'Not supplied'}</div></div><div class='goal-remaining'>{goal_summary}</div></div>
+        {goal_distance_html}
+        {goal_projection}
+        <div class='note'>Projection assumes current fat-free mass is maintained and is mathematical, not a prescribed target.</div>
         <div class='subbox-title'>CURRENT ASSESSMENT</div>
         <div class='assess'>
-          <div class='assess-row'><span>Body fat</span><i class='assess-dot {bf_cls}'></i><span class='pill {bf_cls if bf_cls!='good' else ''}'>{bf_status}</span></div>
-          <div class='assess-row'><span>Visceral fat</span><i class='assess-dot {vis_cls}'></i><span class='pill {vis_cls if vis_cls!='good' else ''}'>{vis_status}</span></div>
-          <div class='assess-row'><span>Muscle %</span><i class='assess-dot {mm_cls}'></i><span class='pill {mm_cls if mm_cls!='good' else ''}'>{mm_status}</span></div>
-          <div class='assess-row'><span>BMI</span><i class='assess-dot {bmi_cls}'></i><span class='pill {bmi_cls if bmi_cls!='good' else ''}'>{bmi_status}</span></div>
-          <div class='assess-row'><span>Water %</span><i class='assess-dot {water_cls}'></i><span class='pill {water_cls if water_cls!='good' else ''}'>{water_status}</span></div>
+          <div class='assess-row'><span>Body fat</span><i class='assess-dot {bf_cls}'></i><span class='pill {bf_cls if bf_cls!='good' else ''}'>{bf_status_d}</span></div>
+          <div class='assess-row'><span>Visceral fat</span><i class='assess-dot {vis_cls}'></i><span class='pill {vis_cls if vis_cls!='good' else ''}'>{vis_status_d}</span></div>
+          <div class='assess-row'><span>Muscle %</span><i class='assess-dot {mm_cls}'></i><span class='pill {mm_cls if mm_cls!='good' else ''}'>{mm_status_d}</span></div>
+          <div class='assess-row'><span>BMI</span><i class='assess-dot {bmi_cls}'></i><span class='pill {bmi_cls if bmi_cls!='good' else ''}'>{bmi_status_d}</span></div>
+          <div class='assess-row'><span>Water %</span><i class='assess-dot {water_cls}'></i><span class='pill {water_cls if water_cls!='good' else ''}'>{water_status_d}</span></div>
         </div>
         <div class='subbox-title'>REFERENCE MATH</div>
         {math_rows}
       </div></div>
     </div>
   </div>
-  <div class='footer'><span>Withings-derived report. Muscle Mass is not strictly Skeletal Muscle Mass (SMM). No proprietary InBody Score is calculated.</span><span>Whole-body: {scan_date} &nbsp; | &nbsp; Segmental: {seg_date}</span></div>
+
+  <div class='footer'>
+    <span>Withings-derived report. Muscle Mass is not InBody Skeletal Muscle Mass (SMM). No proprietary InBody Score is calculated.</span>
+    <span>Whole-body {scan_date} · Segmental {seg_date}</span>
+  </div>
 </div></body></html>"""
     return html
 
