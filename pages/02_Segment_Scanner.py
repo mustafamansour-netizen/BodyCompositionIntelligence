@@ -19,8 +19,6 @@ if other_file:
         errors="coerce"
     )
 
-    st.success("other.csv loaded")
-
     segment_types = [
         "Muscle Mass for segments",
         "Fat Mass for segments in mass unit",
@@ -31,30 +29,30 @@ if other_file:
         other_df["type"].isin(segment_types)
     ]
 
-    st.metric(
-        "Segment Records",
-        len(segment_df)
+    st.success("Segment data detected")
+
+    latest_date = segment_df["date"].max()
+
+    latest_scan = segment_df[
+        segment_df["date"] == latest_date
+    ]
+
+    st.subheader(
+        f"Latest Segment Scan ({latest_date})"
     )
 
-    st.subheader("Detected Segment Data")
-
-    st.dataframe(
-        segment_df[
-            [
-                "date",
-                "type",
-                "position",
-                "value"
-            ]
-        ].head(100),
-        use_container_width=True
+    pivot_table = (
+        latest_scan
+        .pivot_table(
+            index="position",
+            columns="type",
+            values="value",
+            aggfunc="first"
+        )
+        .reset_index()
     )
 
-    st.subheader("Segment Positions")
-
     st.dataframe(
-        segment_df["position"]
-        .value_counts()
-        .reset_index(),
+        pivot_table,
         use_container_width=True
     )
