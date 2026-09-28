@@ -378,7 +378,67 @@ kpi6.metric(
     "Fat-Free Mass",
     f"{fat_free_mass:.1f} kg"
 )
+st.divider()
 
+latest_date = latest_scan["Date"]
+
+past_30_days = complete_scans[
+    complete_scans["Date"]
+    <= latest_date
+]
+
+past_30_days = past_30_days[
+    past_30_days["Date"]
+    >= latest_date - pd.Timedelta(days=30)
+]
+
+if len(past_30_days) > 1:
+
+    first_30 = (
+        past_30_days
+        .sort_values("Date")
+        .iloc[0]
+    )
+
+    weight_change = (
+        weight
+        - float(first_30["Weight (kg)"])
+    )
+
+    fat_change = (
+        body_fat_pct
+        - (
+            float(first_30["Fat mass (kg)"])
+            / float(first_30["Weight (kg)"])
+            * 100
+        )
+    )
+
+    muscle_change = (
+        muscle_mass
+        - float(first_30["Muscle mass (kg)"])
+    )
+
+    st.subheader(
+        "30 Day Performance"
+    )
+
+    t1, t2, t3 = st.columns(3)
+
+    t1.metric(
+        "Weight Change",
+        f"{weight_change:+.1f} kg"
+    )
+
+    t2.metric(
+        "Body Fat Change",
+        f"{fat_change:+.1f}%"
+    )
+
+    t3.metric(
+        "Muscle Change",
+        f"{muscle_change:+.1f} kg"
+    )
 st.divider()
 
 st.subheader(
@@ -694,3 +754,51 @@ with assessment_column:
         "Hydration Mass",
         f"{hydration_mass:.1f} kg"
     )
+st.divider()
+
+st.subheader(
+    "Goal Tracking"
+)
+
+goal_weight = st.number_input(
+    "Goal Weight (kg)",
+    min_value=50.0,
+    max_value=150.0,
+    value=82.0,
+    step=0.5
+)
+
+weight_gap = weight - goal_weight
+
+projected_fat_mass = (
+    goal_weight
+    - fat_free_mass
+)
+
+projected_fat_pct = (
+    projected_fat_mass
+    / goal_weight
+) * 100
+
+g1, g2, g3 = st.columns(3)
+
+g1.metric(
+    "Current Weight",
+    f"{weight:.1f} kg"
+)
+
+g2.metric(
+    "Goal Weight",
+    f"{goal_weight:.1f} kg"
+)
+
+g3.metric(
+    "Difference",
+    f"{weight_gap:+.1f} kg"
+)
+
+st.metric(
+    "Projected Body Fat %",
+    f"{projected_fat_pct:.1f}%"
+)
+`
