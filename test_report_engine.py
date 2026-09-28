@@ -54,6 +54,23 @@ def test_core_numbers():
     assert "82.0 kg" in html
 
 
+def test_history_uses_one_scan_per_day():
+    w,o=synthetic_frames()
+    # Add an earlier complete scan on 22 Sep. The report should retain only the
+    # latest real complete scan from that calendar day in its compact history.
+    w.loc[len(w)] = ["2026-09-22 07:00:00", 92.3, 19.0, 3.52, 69.4, 49.0]
+    from report_engine import normalize_frames
+    w,o,meta=normalize_frames(w,o,{})
+    p=Profile("Mustafa","Male",1.82,date(1982,10,20),None,82.5)
+    r=build_report_data(w,o,p,diagnostics=meta)
+    days=pd.to_datetime(r.history["Date"]).dt.date
+    assert days.nunique()==len(days)
+    sep22=r.history[pd.to_datetime(r.history["Date"]).dt.date==date(2026,9,22)]
+    assert len(sep22)==1
+    assert sep22.iloc[0]["Weight (kg)"]==91.94
+
+
 if __name__ == '__main__':
     test_core_numbers()
+    test_history_uses_one_scan_per_day()
     print('OK')
