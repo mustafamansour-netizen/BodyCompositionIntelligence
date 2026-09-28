@@ -1,5 +1,17 @@
 import streamlit as st
+import pandas as pd
 
-st.title("Body Model Test")
+st.title("Body Model")
 
-st.write("If you can see this text, the file works.")
+other_file = st.file_uploader(
+    "Upload other.csv",
+    type=["csv"]
+)
+
+if other_file:
+
+    st.success("File loaded")
+
+    other_df = pd.read_csv(other_file)
+
+    st.write(other_df.head())
