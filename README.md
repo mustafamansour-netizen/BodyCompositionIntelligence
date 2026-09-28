@@ -1,3 +1,9 @@
+# Body Composition Intelligence V5.1
+
+V5.1 is a small deployment-hardening update to V5. It adds an explicit guard for the common case where GitHub/Streamlit has a new `app.py` but an older `report_engine.py`. Instead of a redacted TypeError, the app now shows a clear version-mismatch message.
+
+**Important:** upload `app.py` and `report_engine.py` from the same package and commit them together.
+
 # Body Composition Intelligence — v5
 
 Streamlit app that imports a Withings export ZIP (or `weight.csv` + `other.csv`) and builds a printable one-page InBody-style body-composition report without inventing proprietary InBody metrics.

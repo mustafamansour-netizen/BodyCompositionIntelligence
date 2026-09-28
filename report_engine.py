@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 
 
+ENGINE_BUILD = "V5.1"
+
 # -----------------------------
 # Data model
 # -----------------------------

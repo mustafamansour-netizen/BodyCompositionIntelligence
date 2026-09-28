@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+import inspect
 
 import pandas as pd
 import streamlit as st
@@ -31,6 +32,7 @@ st.markdown(
 )
 
 st.title("Withings → InBody-style Body Composition Report")
+st.caption("Build V5.1")
 st.markdown(
     "<div class='report-note'>Upload the original Withings export ZIP (recommended) or weight.csv + other.csv. "
     "The report uses the latest complete whole-body scan and the latest self-contained segmental snapshot; it never invents missing history values.</div>",
@@ -119,16 +121,31 @@ if weight_df is None or other_df is None:
     )
     st.stop()
 
-profile = Profile(
-    name=name or "Profile",
-    sex=sex,
-    height_m=float(height_cm) / 100.0,
-    birth_date=dob,
-    age_override=age_override,
-    goal_weight_kg=float(goal) if use_goal else None,
-    history_daily_rule=history_daily_rule,
-    history_points=int(history_points),
-)
+profile_kwargs = {
+    "name": name or "Profile",
+    "sex": sex,
+    "height_m": float(height_cm) / 100.0,
+    "birth_date": dob,
+    "age_override": age_override,
+    "goal_weight_kg": float(goal) if use_goal else None,
+    "history_daily_rule": history_daily_rule,
+    "history_points": int(history_points),
+}
+
+# Guard against a partial GitHub deployment where app.py was updated but
+# report_engine.py is still from an older version. Streamlit otherwise shows a
+# redacted TypeError that is not useful to the user.
+profile_params = set(inspect.signature(Profile).parameters)
+unsupported_profile_fields = [k for k in profile_kwargs if k not in profile_params]
+if unsupported_profile_fields:
+    st.error(
+        "Deployment file mismatch: app.py is V5+ but report_engine.py is older. "
+        "Replace report_engine.py from the same package, commit it, then reboot the Streamlit app. "
+        f"Missing Profile fields: {', '.join(unsupported_profile_fields)}"
+    )
+    st.stop()
+
+profile = Profile(**profile_kwargs)
 
 try:
     report = build_report_data(weight_df, other_df, profile, bands=bands, diagnostics=import_meta)
