@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 
-ENGINE_BUILD = "V6"
+ENGINE_BUILD = "V6.2"
 
 # -----------------------------
 # Data model
@@ -321,6 +321,13 @@ def _latest_metric(other_df: pd.DataFrame, kind: str, at_or_before: pd.Timestamp
 
 
 def _find_latest_segment_snapshot(other_df: pd.DataFrame) -> Tuple[Optional[pd.Timestamp], Dict[str, SegmentValue], Dict[str, object]]:
+    """Return the latest usable segmental snapshot plus prior complete snapshot metadata.
+
+    The latest snapshot follows the existing rule: prefer the latest snapshot with all
+    five muscle and fat regions, otherwise use the latest snapshot with the best
+    coverage.  For change arrows we only compare against the previous *fully complete*
+    segmental snapshot so that a missing limb cannot look like a gain/loss.
+    """
     seg = other_df.copy()
     seg["kind"] = seg["type"].map(_metric_kind)
     seg["position_canon"] = seg["position"].map(_canonical_position)
@@ -330,21 +337,36 @@ def _find_latest_segment_snapshot(other_df: pd.DataFrame) -> Tuple[Optional[pd.T
         & seg["value_numeric"].notna()
     ].copy()
 
-    empty = {p: SegmentValue() for p in ["Left Arm", "Right Arm", "Torso", "Left Leg", "Right Leg"]}
+    positions = ["Left Arm", "Right Arm", "Torso", "Left Leg", "Right Leg"]
+    target_positions = set(positions)
+    empty = {p: SegmentValue() for p in positions}
     if seg.empty:
         return None, empty, {"segment_candidates": 0}
 
     seg["scan_key"] = seg["date"].dt.floor("min")
-    target_positions = {"Left Arm", "Right Arm", "Torso", "Left Leg", "Right Leg"}
-
     candidates = []
     for scan_key, g in seg.groupby("scan_key"):
         mus_pos = set(g.loc[g["kind"] == "segment_muscle", "position_canon"])
         fat_pos = set(g.loc[g["kind"] == "segment_fat", "position_canon"])
         complete = len(target_positions & mus_pos & fat_pos)
-        candidates.append((scan_key, complete, len(g)))
+        candidates.append((pd.Timestamp(scan_key), complete, len(g)))
 
-    # Prefer the latest fully complete snapshot; otherwise latest best-coverage snapshot.
+    def build_snapshot(scan_key: pd.Timestamp) -> Dict[str, SegmentValue]:
+        g = seg[seg["scan_key"] == scan_key]
+        out: Dict[str, SegmentValue] = {}
+        for pos in positions:
+            pg = g[g["position_canon"] == pos]
+            vals = {}
+            for kind, field_name in [
+                ("segment_muscle", "muscle_kg"),
+                ("segment_fat", "fat_kg"),
+                ("segment_ffm", "ffm_kg"),
+            ]:
+                kg = pg.loc[pg["kind"] == kind, "value_numeric"]
+                vals[field_name] = float(kg.iloc[-1]) if not kg.empty else None
+            out[pos] = SegmentValue(**vals)
+        return out
+
     full = [x for x in candidates if x[1] == 5]
     if full:
         scan_key = max(full, key=lambda x: x[0])[0]
@@ -352,23 +374,19 @@ def _find_latest_segment_snapshot(other_df: pd.DataFrame) -> Tuple[Optional[pd.T
         best_coverage = max(x[1] for x in candidates)
         scan_key = max([x for x in candidates if x[1] == best_coverage], key=lambda x: x[0])[0]
 
-    g = seg[seg["scan_key"] == scan_key]
-    out: Dict[str, SegmentValue] = {}
-    for pos in ["Left Arm", "Right Arm", "Torso", "Left Leg", "Right Leg"]:
-        pg = g[g["position_canon"] == pos]
-        vals = {}
-        for kind, field_name in [
-            ("segment_muscle", "muscle_kg"),
-            ("segment_fat", "fat_kg"),
-            ("segment_ffm", "ffm_kg"),
-        ]:
-            kg = pg.loc[pg["kind"] == kind, "value_numeric"]
-            vals[field_name] = float(kg.iloc[-1]) if not kg.empty else None
-        out[pos] = SegmentValue(**vals)
+    out = build_snapshot(scan_key)
+    prior_full = [x for x in full if x[0] < scan_key]
+    previous_segment_date = None
+    previous_segments = None
+    if prior_full:
+        previous_segment_date = max(prior_full, key=lambda x: x[0])[0]
+        previous_segments = build_snapshot(previous_segment_date)
 
     return pd.Timestamp(scan_key), out, {
         "segment_candidates": len(candidates),
         "segment_complete_positions": next((x[1] for x in candidates if x[0] == scan_key), 0),
+        "previous_segment_date": previous_segment_date,
+        "previous_segments": previous_segments,
     }
 
 
@@ -633,11 +651,56 @@ def _segment_body_svg(data: ReportData, metric: str) -> str:
     </svg>"""
 
 
-def _segment_label(position: str, value: Optional[float], side: str = "left") -> str:
+def _segment_change(data: ReportData, position: str, metric: str) -> Optional[float]:
+    previous = (data.diagnostics or {}).get("previous_segments")
+    if not previous or position not in previous or position not in data.segments:
+        return None
+    cur = _segment_metric_value(data.segments[position], metric)
+    prev = _segment_metric_value(previous[position], metric)
+    if cur is None or prev is None:
+        return None
+    return float(cur) - float(prev)
+
+
+def _segment_delta_html(delta: Optional[float], metric: str) -> str:
+    if delta is None:
+        return "<span class='seg-delta neutral-delta'>no prior</span>"
+    if abs(delta) < 0.05:
+        return "<span class='seg-delta neutral-delta'>→ 0.0 kg</span>"
+    arrow = "↑" if delta > 0 else "↓"
+    # Colour is coaching-oriented, not a clinical rating: muscle gain / fat loss are
+    # favourable directions; muscle loss / fat gain are attention directions.
+    favourable = (metric == "muscle" and delta > 0) or (metric == "fat" and delta < 0)
+    cls = "favourable" if favourable else "attention"
+    return f"<span class='seg-delta {cls}'>{arrow} {abs(delta):.1f} kg</span>"
+
+
+def _segment_label(data: ReportData, position: str, value: Optional[float], metric: str, side: str = "left") -> str:
+    delta = _segment_change(data, position, metric)
     return f"""<div class='seg-readout {side}'>
       <span class='seg-name'>{escape(position.upper())}</span>
       <b>{fmt_num(value,1,' kg')}</b>
+      {_segment_delta_html(delta, metric)}
     </div>"""
+
+
+def _largest_segment_change(data: ReportData, metric: str, favourable_only: bool = True) -> Tuple[Optional[str], Optional[float]]:
+    vals = []
+    for pos in ["Left Arm", "Right Arm", "Torso", "Left Leg", "Right Leg"]:
+        d = _segment_change(data, pos, metric)
+        if d is not None:
+            vals.append((pos, d))
+    if not vals:
+        return None, None
+    if metric == "muscle":
+        candidates = [(p,d) for p,d in vals if d > 0] if favourable_only else vals
+        if not candidates:
+            return None, None
+        return max(candidates, key=lambda x: x[1])
+    candidates = [(p,d) for p,d in vals if d < 0] if favourable_only else vals
+    if not candidates:
+        return None, None
+    return min(candidates, key=lambda x: x[1])
 
 
 def _segment_analysis_panel(data: ReportData, metric: str) -> str:
@@ -646,35 +709,63 @@ def _segment_analysis_panel(data: ReportData, metric: str) -> str:
     ll, rl = seg.get("Left Leg", SegmentValue()), seg.get("Right Leg", SegmentValue())
     torso = seg.get("Torso", SegmentValue())
     getv = lambda x: _segment_metric_value(x, metric)
+    prev_date_obj = (data.diagnostics or {}).get("previous_segment_date")
+    prev_date = pd.Timestamp(prev_date_obj).strftime("%d %b %Y") if prev_date_obj is not None else None
+    torso_delta = _segment_change(data, "Torso", metric)
     if metric == "muscle":
         title, subtitle, cls = "SEGMENTAL MUSCLE ANALYSIS", "Withings regional muscle mass", "muscle"
-        foot = f"Arm L/R difference: {fmt_num(_balance(getv(la), getv(ra)),1,'%')} &nbsp;&nbsp; | &nbsp;&nbsp; Leg L/R difference: {fmt_num(_balance(getv(ll), getv(rl)),1,'%')}"
+        foot = f"Arm L/R difference {fmt_num(_balance(getv(la), getv(ra)),1,'%')} · Leg L/R difference {fmt_num(_balance(getv(ll), getv(rl)),1,'%')}"
     else:
         title, subtitle, cls = "SEGMENTAL FAT ANALYSIS", "Withings regional fat mass", "fat"
-        foot = "Regional fat mass values only — no clinical segment rating inferred"
+        foot = "Regional fat mass; arrows show change from previous complete segmental scan"
+    prior_note = f"vs {prev_date}" if prev_date else "no prior complete segmental scan"
     return f"""
       <div class='seg-panel {cls}'>
-        <div class='seg-panel-head'><div><b>{title}</b><span>{subtitle}</span></div></div>
+        <div class='seg-panel-head'><div><b>{title}</b><span>{subtitle}</span></div><small>{prior_note}</small></div>
         <div class='seg-panel-body'>
           <div class='seg-side seg-left'>
-            {_segment_label('Left Arm', getv(la), 'right')}
-            {_segment_label('Left Leg', getv(ll), 'right')}
+            {_segment_label(data, 'Left Arm', getv(la), metric, 'right')}
+            {_segment_label(data, 'Left Leg', getv(ll), metric, 'right')}
           </div>
           <div class='seg-figure'>
-            <div class='seg-torso'><span>TORSO</span><b>{fmt_num(getv(torso),1,' kg')}</b></div>
             {_segment_body_svg(data, metric)}
+            <div class='seg-torso-chip'><span>TORSO</span><b>{fmt_num(getv(torso),1,' kg')}</b>{_segment_delta_html(torso_delta, metric)}</div>
           </div>
           <div class='seg-side seg-right'>
-            {_segment_label('Right Arm', getv(ra), 'left')}
-            {_segment_label('Right Leg', getv(rl), 'left')}
+            {_segment_label(data, 'Right Arm', getv(ra), metric, 'left')}
+            {_segment_label(data, 'Right Leg', getv(rl), metric, 'left')}
           </div>
         </div>
         <div class='seg-panel-foot'>{foot}</div>
       </div>"""
 
 
-def _history_track(values: List[float], color: str = "#1c3f52", width: int = 360, height: int = 116) -> str:
-    """InBody-like point history without horizontally stretching the value labels."""
+def _segment_trend_summary(data: ReportData) -> str:
+    prev_date_obj = (data.diagnostics or {}).get("previous_segment_date")
+    if prev_date_obj is None:
+        return "<div class='segment-trend-empty'>No previous complete segmental scan available for regional change.</div>"
+    prev_date = pd.Timestamp(prev_date_obj).strftime("%d %b %Y")
+    mp, md = _largest_segment_change(data, "muscle", True)
+    fp, fd = _largest_segment_change(data, "fat", True)
+    muscle = f"<b>Largest muscle gain</b><span>{escape(mp)} +{md:.1f} kg</span>" if mp and md is not None else "<b>Muscle change</b><span>No regional gain</span>"
+    fat = f"<b>Largest fat loss</b><span>{escape(fp)} {fd:.1f} kg</span>" if fp and fd is not None else "<b>Fat change</b><span>No regional loss</span>"
+
+    attention = []
+    for pos in ["Left Arm", "Right Arm", "Torso", "Left Leg", "Right Leg"]:
+        dm = _segment_change(data, pos, "muscle")
+        df = _segment_change(data, pos, "fat")
+        if dm is not None and dm < -0.05:
+            attention.append((abs(dm), f"{pos} muscle ↓ {abs(dm):.1f} kg"))
+        if df is not None and df > 0.05:
+            attention.append((abs(df), f"{pos} fat ↑ {abs(df):.1f} kg"))
+    watch = max(attention, key=lambda x: x[0])[1] if attention else "No notable muscle loss / fat gain"
+    return f"""<div class='segment-trend-summary'>
+      <div>{muscle}</div><div>{fat}</div><div><b>Attention change</b><span>{escape(watch)}</span></div><small>vs {prev_date}</small>
+    </div>"""
+
+
+def _history_track(values: List[float], color: str = "#1c3f52", width: int = 1000, height: int = 78) -> str:
+    """Responsive InBody-like history line that uses the full horizontal plot area."""
     if not values:
         return f"<svg viewBox='0 0 {width} {height}' class='history-svg'></svg>"
     arr = np.asarray(values, dtype=float)
@@ -684,23 +775,30 @@ def _history_track(values: List[float], color: str = "#1c3f52", width: int = 360
     lo, hi = float(finite.min()), float(finite.max())
     if math.isclose(lo, hi):
         lo -= 1.0; hi += 1.0
-    pad = max((hi-lo)*0.36, 0.35)
+    pad = max((hi-lo)*0.34, 0.30)
     lo -= pad; hi += pad
     n = len(arr)
-    xs = np.linspace(22, width-22, n) if n > 1 else np.array([width/2])
+    xpad = 42 if n <= 8 else 34
+    xs = np.linspace(xpad, width-xpad, n) if n > 1 else np.array([width/2])
     def yy(v):
-        return height - 24 - (v-lo)/(hi-lo)*(height-54)
-    pts=[]; dots=[]; labels=[]
-    for x,v in zip(xs,arr):
+        return height - 13 - (v-lo)/(hi-lo)*(height-30)
+    pts=[]; dots=[]; labels=[]; guides=[]
+    for i,(x,v) in enumerate(zip(xs,arr)):
         y=yy(float(v)); pts.append(f"{x:.1f},{y:.1f}")
-        dots.append(f"<circle cx='{x:.1f}' cy='{y:.1f}' r='3.5' fill='{color}'/>")
-        labels.append(f"<text x='{x:.1f}' y='{max(15,y-10):.1f}' text-anchor='middle' class='hval'>{v:.1f}</text>")
+        guides.append(f"<line x1='{x:.1f}' x2='{x:.1f}' y1='11' y2='{height-11}' class='hguide'/>")
+        if i == n-1:
+            dots.append(f"<circle cx='{x:.1f}' cy='{y:.1f}' r='8.0' class='hlatest-halo'/><circle cx='{x:.1f}' cy='{y:.1f}' r='5.0' fill='{color}' class='hlatest'/>")
+            label_cls='hval hval-latest'
+        else:
+            dots.append(f"<circle cx='{x:.1f}' cy='{y:.1f}' r='4.2' fill='{color}'/>")
+            label_cls='hval'
+        labels.append(f"<text x='{x:.1f}' y='{max(11,y-8):.1f}' text-anchor='middle' class='{label_cls}'>{v:.1f}</text>")
     return f"""<svg viewBox='0 0 {width} {height}' class='history-svg'>
-      <line x1='12' x2='{width-12}' y1='{height-18}' y2='{height-18}' class='hbase'/>
-      <polyline points='{' '.join(pts)}' fill='none' stroke='{color}' stroke-width='3.1' stroke-linecap='round' stroke-linejoin='round'/>
+      {''.join(guides)}
+      <line x1='10' x2='{width-10}' y1='{height-10}' y2='{height-10}' class='hbase'/>
+      <polyline points='{' '.join(pts)}' fill='none' stroke='{color}' stroke-width='3.4' vector-effect='non-scaling-stroke' stroke-linecap='round' stroke-linejoin='round'/>
       {''.join(dots)}{''.join(labels)}
     </svg>"""
-
 
 
 def _history_panel(data: ReportData) -> str:
@@ -712,6 +810,7 @@ def _history_panel(data: ReportData) -> str:
     weights = [float(v) for v in h["Weight (kg)"]]
     muscle = [float(v) for v in h["Muscle mass (kg)"]]
     fat = [float(v) for v in h["Body fat %"]]
+    day_span = max(0, (pd.Timestamp(h["Date"].iloc[-1]).floor("D") - pd.Timestamp(h["Date"].iloc[0]).floor("D")).days)
 
     def latest_monthly(col, suffix):
         vals = [float(v) for v in data.monthly[col].tolist() if not pd.isna(v)]
@@ -730,19 +829,23 @@ def _history_panel(data: ReportData) -> str:
             <b>{label}</b><span>{sublabel}</span>
             <small>Monthly median<br><strong>{median_text}</strong></small>
           </div>
-          <div class='ih-plot'>{_history_track(vals, width=520, height=104)}</div>
-          <div class='ih-change'><span>PERIOD Δ</span><b>{delta_text(vals, suffix)}</b><small>{dates[0]} → {dates[-1]}</small></div>
+          <div class='ih-plot'>{_history_track(vals, width=1000, height=78)}</div>
+          <div class='ih-change'><span>{day_span}-DAY Δ</span><b>{delta_text(vals, suffix)}</b><small>{dates[0]} → {dates[-1]}</small></div>
         </div>"""
 
-    date_cells = "".join(
-        f"<span><b>{d.split()[0]}</b><small>{d.split()[1]}</small></span>" for d in dates
-    )
+    n=len(dates)
+    date_parts=[]
+    for i,d in enumerate(dates):
+        show = n <= 8 or i % 2 == 0 or i == n-1
+        day,mon=d.split()
+        date_parts.append(f"<span class='{'date-muted' if not show else ''}'>{f'<b>{day}</b><small>{mon}</small>' if show else ''}</span>")
+    date_cells = "".join(date_parts)
     return f"""<div class='ih-wrap'>
         {row('Weight','kg',weights,latest_monthly('Weight (kg)',' kg'),' kg')}
         {row('Muscle Mass','kg',muscle,latest_monthly('Muscle mass (kg)',' kg'),' kg')}
         {row('Body Fat','%',fat,latest_monthly('Body fat %','%'),' pp')}
         <div class='ih-dates'><div></div><div class='ih-date-grid' style='grid-template-columns:repeat({len(dates)},1fr)'>{date_cells}</div><div></div></div>
-        <div class='ih-note'>{escape(data.profile.history_daily_rule)} per measured day · {len(dates)} days shown · monthly medians use all complete scans and remain gap-aware.</div>
+        <div class='ih-note'>{escape(data.profile.history_daily_rule)} per measured day · {len(dates)} days shown · latest point emphasized · monthly medians use all complete scans and remain gap-aware.</div>
       </div>"""
 
 
@@ -894,8 +997,8 @@ def render_report_html(data: ReportData, standalone: bool = True) -> str:
 
     snapshot_goal = goal_summary if goal is not None else f"BMI {data.bands.bmi[1]:.1f} boundary"
     snapshot_ref = f"BF {bf_status_d} · Muscle {mm_status_d}"
-    snapshot_prev = f"{signed(d_w,2,' kg')} · BF {signed(d_bf,1,' pp')}" if d_w is not None else "No prior measured day"
-    snapshot_30 = f"Wt {signed(m_w,1,' kg')} · BF {signed(m_bf,1,' pp')}" if m_w is not None else "Insufficient data"
+    snapshot_prev = f"Weight {signed(d_w,2,' kg')} · BF {signed(d_bf,1,' pp')}" if d_w is not None else "No prior measured day"
+    snapshot_30 = f"Weight {signed(m_w,1,' kg')} · BF {signed(m_bf,1,' pp')}" if m_w is not None else "Insufficient data"
 
     html = f"""<!doctype html>
 <html><head><meta charset='utf-8'><style>
@@ -950,40 +1053,54 @@ html,body {{ margin:0; padding:0; background:#eef3f6; font-family:Arial,Helvetic
 .marker {{ position:absolute; top:50%; width:3mm; height:3mm; margin-left:-1.5mm; margin-top:-1.5mm; border-radius:50%; background:#075b84; box-shadow:0 0 0 .4mm #fff; }}
 
 .segment-card {{ margin-bottom:2.2mm; }}
-.segment-wrap {{ padding:1.4mm 1.7mm 1.2mm; height:52mm; }}
-.segment-panels {{ display:grid; grid-template-columns:1fr 1fr; gap:2.1mm; height:100%; }}
+.segment-wrap {{ padding:1.2mm 1.7mm 1.1mm; height:58.5mm; }}
+.segment-panels {{ display:grid; grid-template-columns:1fr 1fr; gap:2.1mm; height:49.2mm; }}
 .seg-panel {{ border:1px solid #cad9e2; background:#f7fafc; overflow:hidden; position:relative; }}
-.seg-panel-head {{ height:7mm; padding:1.4mm 2mm; background:#eef5f8; }}
+.seg-panel-head {{ height:7mm; padding:1.15mm 1.8mm; background:#eef5f8; display:flex; justify-content:space-between; align-items:flex-start; gap:1.5mm; }}
 .seg-panel-head b {{ display:block; font-size:7pt; color:#086a97; }} .seg-panel.fat .seg-panel-head b {{ color:#9b680d; }}
-.seg-panel-head span {{ display:block; font-size:4.6pt; color:#718591; margin-top:.2mm; }}
-.seg-panel-body {{ height:36.5mm; display:grid; grid-template-columns:1fr 23mm 1fr; align-items:center; padding:0 2mm; }}
-.seg-side {{ height:100%; display:flex; flex-direction:column; justify-content:space-around; padding:5mm 0 2.5mm; }}
-.seg-readout {{ font-size:4.8pt; color:#537080; }} .seg-readout.right {{ text-align:right; }} .seg-readout.left {{ text-align:left; }}
-.seg-readout b {{ display:block; font-size:7.4pt; color:#00628f; margin-top:.3mm; }} .seg-panel.fat .seg-readout b {{ color:#a36b05; }}
-.seg-name {{ font-size:4.6pt; font-weight:800; color:#607784; }}
-.seg-figure {{ position:relative; height:100%; display:flex; align-items:flex-end; justify-content:center; padding-bottom:1.2mm; }}
-.segment-body-svg {{ width:22mm; height:34mm; display:block; }}
-.seg-torso {{ position:absolute; top:.8mm; left:50%; transform:translateX(-50%); text-align:center; z-index:2; white-space:nowrap; }}
-.seg-torso span {{ display:block; font-size:4.3pt; font-weight:800; color:#607784; }} .seg-torso b {{ font-size:7.4pt; color:#00628f; }} .seg-panel.fat .seg-torso b {{ color:#a36b05; }}
-.seg-panel-foot {{ height:5.8mm; border-top:1px solid #dbe5ea; display:flex; align-items:center; justify-content:center; font-size:4.2pt; color:#6b7e88; padding:0 1mm; }}
+.seg-panel-head span {{ display:block; font-size:4.55pt; color:#718591; margin-top:.15mm; }}
+.seg-panel-head small {{ font-size:3.8pt; color:#80919a; white-space:nowrap; padding-top:.25mm; }}
+.seg-panel-body {{ height:36.5mm; display:grid; grid-template-columns:1fr 25mm 1fr; align-items:center; padding:0 3.2mm; }}
+.seg-side {{ height:100%; display:flex; flex-direction:column; justify-content:space-around; padding:4.4mm 0 2.3mm; }}
+.seg-readout {{ font-size:4.8pt; color:#537080; line-height:1.08; }} .seg-readout.right {{ text-align:right; }} .seg-readout.left {{ text-align:left; }}
+.seg-readout b {{ display:block; font-size:7.3pt; color:#00628f; margin-top:.25mm; }} .seg-panel.fat .seg-readout b {{ color:#a36b05; }}
+.seg-name {{ font-size:4.55pt; font-weight:800; color:#607784; }}
+.seg-delta {{ display:block; margin-top:.35mm; font-size:4.15pt; font-weight:800; letter-spacing:.02em; }}
+.seg-delta.favourable {{ color:#2b8b55; }} .seg-delta.attention {{ color:#b56b24; }} .seg-delta.neutral-delta {{ color:#87959c; font-weight:600; }}
+.seg-figure {{ position:relative; height:100%; display:flex; align-items:flex-end; justify-content:center; padding-bottom:.7mm; }}
+.segment-body-svg {{ width:24mm; height:35.5mm; display:block; }}
+.seg-torso-chip {{ position:absolute; left:50%; top:14.2mm; transform:translate(-50%,-50%); z-index:3; min-width:18mm; padding:.65mm 1mm .55mm; border-radius:2mm; background:rgba(255,255,255,.94); border:.25mm solid rgba(20,74,99,.16); box-shadow:0 .25mm .7mm rgba(25,58,74,.10); text-align:center; line-height:1.02; }}
+.seg-torso-chip span {{ display:block; font-size:3.75pt; font-weight:800; color:#607784; }}
+.seg-torso-chip b {{ display:block; margin-top:.15mm; font-size:6.2pt; color:#075c86; }} .seg-panel.fat .seg-torso-chip b {{ color:#8c5b0a; }}
+.seg-torso-chip .seg-delta {{ font-size:3.55pt; margin-top:.25mm; }}
+.seg-panel-foot {{ height:5.7mm; border-top:1px solid #dbe5ea; display:flex; align-items:center; justify-content:center; font-size:4.05pt; color:#6b7e88; padding:0 1mm; text-align:center; }}
+.segment-trend-summary {{ height:6.7mm; margin-top:1mm; display:grid; grid-template-columns:.92fr .92fr 1.18fr auto; align-items:center; gap:2mm; padding:.7mm 1.5mm; border-radius:1.2mm; background:#edf5f8; color:#486878; font-size:4.25pt; }}
+.segment-trend-summary div {{ display:flex; align-items:baseline; gap:1.2mm; min-width:0; }}
+.segment-trend-summary b {{ color:#2d5b70; white-space:nowrap; }} .segment-trend-summary span {{ color:#075c86; font-weight:800; white-space:nowrap; }}
+.segment-trend-summary small {{ color:#71848f; font-size:3.85pt; white-space:nowrap; }}
+.segment-trend-empty {{ height:6.7mm; margin-top:1mm; display:flex; align-items:center; justify-content:center; border-radius:1.2mm; background:#f2f6f8; color:#7a8a93; font-size:4pt; }}
 
 .history-card {{ margin-bottom:2.2mm; }}
-.history-inner {{ padding:1mm 1.3mm .8mm; height:54mm; }}
+.history-inner {{ padding:.8mm 1.1mm .7mm; height:54mm; }}
 .ih-wrap {{ height:100%; }}
-.ih-row {{ display:grid; grid-template-columns:22mm 1fr 25mm; height:13.1mm; border-bottom:1px solid #e6edf1; align-items:center; }}
-.ih-label {{ height:100%; background:#edf4f7; padding:1.4mm 1.5mm; }}
-.ih-label b {{ display:block; font-size:6.5pt; color:#294f62; line-height:1.05; }}
-.ih-label span {{ display:block; font-size:4.4pt; color:#748791; }}
-.ih-label small {{ display:block; margin-top:.7mm; font-size:3.8pt; color:#70838e; line-height:1.05; }} .ih-label small strong {{ color:#355c70; }}
-.ih-plot {{ padding:.1mm .5mm; overflow:hidden; }}
-.history-svg {{ width:100%; height:12.5mm; display:block; }}
-.history-svg .hbase {{ stroke:#d8e0e4; stroke-width:1; }} .history-svg .hval {{ fill:#2b3e48; font-size:12px; font-weight:700; font-family:Arial,Helvetica,sans-serif; }}
-.ih-change {{ padding:1mm 1.2mm; border-left:1px solid #e4ecef; height:100%; display:flex; flex-direction:column; justify-content:center; }}
-.ih-change span {{ font-size:3.8pt; font-weight:800; color:#788a94; }} .ih-change b {{ font-size:6.4pt; color:#0a5d87; margin-top:.3mm; }} .ih-change small {{ font-size:3.6pt; color:#85939b; margin-top:.25mm; }}
-.ih-dates {{ display:grid; grid-template-columns:22mm 1fr 25mm; min-height:5.7mm; }}
-.ih-date-grid {{ display:grid; text-align:center; align-items:start; padding:.5mm .5mm 0; }}
-.ih-date-grid span {{ white-space:nowrap; line-height:1; }} .ih-date-grid b {{ display:block; font-size:3.9pt; color:#536c78; }} .ih-date-grid small {{ display:block; font-size:3.4pt; color:#82919a; }}
-.ih-note {{ margin-top:.3mm; padding:.6mm 1mm; background:#eef4f7; font-size:3.8pt; color:#6c808b; }}
+.ih-row {{ display:grid; grid-template-columns:20.5mm 1fr 23mm; height:13.1mm; border-bottom:1px solid #e6edf1; align-items:center; }}
+.ih-label {{ height:100%; background:#edf4f7; padding:1.35mm 1.35mm; }}
+.ih-label b {{ display:block; font-size:6.55pt; color:#294f62; line-height:1.05; }}
+.ih-label span {{ display:block; font-size:4.45pt; color:#748791; }}
+.ih-label small {{ display:block; margin-top:.65mm; font-size:3.85pt; color:#70838e; line-height:1.05; }} .ih-label small strong {{ color:#355c70; }}
+.ih-plot {{ padding:.05mm .25mm; overflow:hidden; min-width:0; }}
+.history-svg {{ width:100%; height:12.1mm; display:block; overflow:visible; }}
+.history-svg .hbase {{ stroke:#d8e0e4; stroke-width:1; }} .history-svg .hguide {{ stroke:#edf2f4; stroke-width:1; }}
+.history-svg .hval {{ fill:#2b3e48; font-size:11.5px; font-weight:700; font-family:Arial,Helvetica,sans-serif; }}
+.history-svg .hval-latest {{ fill:#075c86; font-weight:800; font-size:12.5px; }}
+.history-svg .hlatest-halo {{ fill:#d7edf6; opacity:.9; }}
+.ih-change {{ padding:1mm 1.1mm; border-left:1px solid #e4ecef; height:100%; display:flex; flex-direction:column; justify-content:center; }}
+.ih-change span {{ font-size:3.9pt; font-weight:800; color:#788a94; }} .ih-change b {{ font-size:6.7pt; color:#0a5d87; margin-top:.3mm; }} .ih-change small {{ font-size:3.55pt; color:#85939b; margin-top:.25mm; }}
+.ih-dates {{ display:grid; grid-template-columns:20.5mm 1fr 23mm; min-height:5.7mm; }}
+.ih-date-grid {{ display:grid; text-align:center; align-items:start; padding:.45mm .25mm 0; }}
+.ih-date-grid span {{ white-space:nowrap; line-height:1; min-width:0; }} .ih-date-grid b {{ display:block; font-size:3.9pt; color:#536c78; }} .ih-date-grid small {{ display:block; font-size:3.4pt; color:#82919a; }}
+.ih-date-grid .date-muted {{ opacity:0; }}
+.ih-note {{ margin-top:.25mm; padding:.6mm 1mm; background:#eef4f7; font-size:3.85pt; color:#6c808b; }}
 
 .bottom-grid {{ display:grid; grid-template-columns:.92fr .98fr 1.1fr; gap:2.2mm; }}
 .bottom-card {{ height:55mm; }}
@@ -1057,10 +1174,10 @@ html,body {{ margin:0; padding:0; background:#eef3f6; font-family:Arial,Helvetic
     </div>
 
     <div class='snapshot'>
-      <div class='snap-item'><div class='snap-label'>Since previous measured day</div><div class='snap-value'>{snapshot_prev}</div><div class='snap-sub'>{prev_date}</div></div>
-      <div class='snap-item'><div class='snap-label'>Vs 30-day median</div><div class='snap-value'>{snapshot_30}</div><div class='snap-sub'>{diag.get('median30_scan_count',0)} complete scans</div></div>
-      <div class='snap-item'><div class='snap-label'>Goal position</div><div class='snap-value'>{snapshot_goal}</div><div class='snap-sub'>Profile-driven target</div></div>
-      <div class='snap-item'><div class='snap-label'>Reference snapshot</div><div class='snap-value'>{snapshot_ref}</div><div class='snap-sub'>BMI: {bmi_status_d} · Visceral: {vis_status_d}</div></div>
+      <div class='snap-item'><div class='snap-label'>Previous measured day</div><div class='snap-value'>{snapshot_prev}</div><div class='snap-sub'>{prev_date}</div></div>
+      <div class='snap-item'><div class='snap-label'>30-day median comparison</div><div class='snap-value'>{snapshot_30}</div><div class='snap-sub'>{diag.get('median30_scan_count',0)} complete scans</div></div>
+      <div class='snap-item'><div class='snap-label'>Goal progress</div><div class='snap-value'>{snapshot_goal}</div><div class='snap-sub'>Profile-driven target</div></div>
+      <div class='snap-item'><div class='snap-label'>Reference status</div><div class='snap-value'>{snapshot_ref}</div><div class='snap-sub'>BMI: {bmi_status_d} · Visceral: {vis_status_d}</div></div>
     </div>
 
     <div class='two-col'>
@@ -1086,7 +1203,7 @@ html,body {{ margin:0; padding:0; background:#eef3f6; font-family:Arial,Helvetic
       <div class='segment-wrap'><div class='segment-panels'>
         {_segment_analysis_panel(data, 'muscle')}
         {_segment_analysis_panel(data, 'fat')}
-      </div></div>
+      </div>{_segment_trend_summary(data)}</div>
     </div>
 
     <div class='card history-card'>

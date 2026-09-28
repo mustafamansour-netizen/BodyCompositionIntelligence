@@ -18,6 +18,13 @@ def synthetic_frames():
         "Date","Weight (kg)","Fat mass (kg)","Bone mass (kg)","Muscle mass (kg)","Hydration (kg)"
     ])
     other_rows=[]
+    prior_dt="2026-08-28 09:30:00"
+    prior_vals={"Left Arm":(4.4,.8),"Right Arm":(4.5,.8),"Torso":(35.2,13.7),"Left leg":(11.8,3.0),"Right leg":(11.8,3.0)}
+    for pos,(m,f) in prior_vals.items():
+        other_rows += [
+            ["Muscle Mass for segments",prior_dt,m,"kg",pos],
+            ["Fat Mass for segments in mass unit",prior_dt,f,"kg",pos],
+        ]
     dt="2026-09-20 10:10:00"
     vals={"Left Arm":(4.6,.7),"Right Arm":(4.8,.7),"Torso":(36.7,12.2),"Left leg":(12.0,2.6),"Right leg":(11.8,2.9)}
     for pos,(m,f) in vals.items():
@@ -47,6 +54,7 @@ def test_core_numbers_and_silhouette():
     assert round(r.muscle_pct,1)==76.1
     assert r.segment_date.strftime('%Y-%m-%d')=='2026-09-20'
     assert round(r.segments['Left Arm'].muscle_kg,1)==4.6
+    assert r.diagnostics['previous_segment_date'].strftime('%Y-%m-%d')=='2026-08-28'
     html=render_report_html(r)
     assert "91.94 kg" in html
     assert "20.0%" in html
@@ -100,7 +108,7 @@ def test_v6_practitioner_identity_and_change_summary():
     assert "Mustafa Mansour" in html
     assert "ID MUS-001" in html
     assert "CHANGE SUMMARY" in html
-    assert "Since previous measured day" in html
+    assert "Previous measured day" in html
     assert "9.94 kg to goal" in html
 
 
@@ -113,6 +121,30 @@ def test_previous_day_respects_selected_history_rule():
     assert r.diagnostics["previous_scan_date"].strftime("%Y-%m-%d")=="2026-09-21"
     assert r.diagnostics["previous_weight_kg"]==92.6
 
+
+def test_v62_segmental_change_and_torso_chip():
+    w,o,meta=synthetic_frames()
+    p=Profile("Mustafa","Male",1.82,date(1982,10,20),None,82.0,"Earliest complete scan",8)
+    r=build_report_data(w,o,p,diagnostics=meta)
+    html=render_report_html(r)
+    assert "seg-torso-chip" in html
+    assert "Largest muscle gain" in html
+    assert "Largest fat loss" in html
+    assert "Left Arm +0.2 kg" in html or "Torso +1.5 kg" in html
+    assert "Torso -1.5 kg" in html
+    assert "vs 28 Aug 2026" in html
+
+
+def test_v62_history_responsive_and_pp_kept():
+    w,o,meta=synthetic_frames()
+    p=Profile("Mustafa","Male",1.82,date(1982,10,20),None,82.0,"Earliest complete scan",12)
+    r=build_report_data(w,o,p,diagnostics=meta)
+    html=render_report_html(r)
+    assert "viewBox='0 0 1000 78'" in html
+    assert "hlatest-halo" in html
+    assert "pp" in html
+    assert "12-day" not in html or "-DAY Δ" in html
+
 if __name__ == '__main__':
     test_core_numbers_and_silhouette()
     test_earliest_daily_rule_is_default()
@@ -120,4 +152,6 @@ if __name__ == '__main__':
     test_daily_median_rule_and_point_count()
     test_v6_practitioner_identity_and_change_summary()
     test_previous_day_respects_selected_history_rule()
+    test_v62_segmental_change_and_torso_chip()
+    test_v62_history_responsive_and_pp_kept()
     print('OK')

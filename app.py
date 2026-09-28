@@ -32,7 +32,7 @@ st.markdown(
 )
 
 st.title("Withings → InBody-style Body Composition Report")
-st.caption("Build V6")
+st.caption("Build V6.2")
 st.markdown(
     "<div class='report-note'>Upload the original Withings export ZIP (recommended) or weight.csv + other.csv. "
     "The report uses the latest complete whole-body scan and the latest self-contained segmental snapshot; it never invents missing history values.</div>",
