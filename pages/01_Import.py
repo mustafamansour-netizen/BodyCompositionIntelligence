@@ -46,14 +46,14 @@ if weight_file and other_file:
     )
 
     col3.metric(
-"First Scan",
-weight_df["Date"].min().strftime("%d %b %Y")
-)
- 
-col4.metric(
-"Latest Scan",
-weight_df["Date"].max().strftime("%d %b %Y")
-)
+        "First Scan",
+        weight_df["Date"].min().strftime("%d %b %Y")
+    )
+
+    col4.metric(
+        "Latest Scan",
+        weight_df["Date"].max().strftime("%d %b %Y")
+    )
 
     st.divider()
 
