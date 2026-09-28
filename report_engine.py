@@ -26,6 +26,8 @@ class Profile:
     birth_date: Optional[date] = None
     age_override: Optional[int] = None
     goal_weight_kg: Optional[float] = None
+    history_daily_rule: str = "Earliest complete scan"
+    history_points: int = 8
 
 
 @dataclass
@@ -385,6 +387,35 @@ def _monthly_history(complete: pd.DataFrame, latest_date: pd.Timestamp) -> pd.Da
     return med.reset_index()
 
 
+def _daily_history(complete: pd.DataFrame, rule: str) -> pd.DataFrame:
+    """Return one representative complete scan per calendar day.
+
+    Supported rules:
+    - Earliest complete scan
+    - Latest complete scan
+    - Daily median
+
+    Daily median is calculated only from complete scans and only for the numeric body-
+    composition fields used by the report. The 12-month monthly medians remain based on
+    all complete scans and are unaffected by this display rule.
+    """
+    df = complete.copy().sort_values("Date")
+    df["_scan_day"] = df["Date"].dt.floor("D")
+    rule_norm = str(rule or "").strip().lower()
+
+    if rule_norm.startswith("latest"):
+        daily = df.groupby("_scan_day", group_keys=False).tail(1).copy()
+    elif "median" in rule_norm:
+        cols = ["Weight (kg)", "Fat mass (kg)", "Bone mass (kg)", "Muscle mass (kg)", "Hydration (kg)"]
+        daily = df.groupby("_scan_day", as_index=False)[cols].median()
+        daily = daily.rename(columns={"_scan_day": "Date"})
+        return daily.sort_values("Date").reset_index(drop=True)
+    else:
+        daily = df.groupby("_scan_day", group_keys=False).head(1).copy()
+
+    return daily.drop(columns=["_scan_day"]).sort_values("Date").reset_index(drop=True)
+
+
 def build_report_data(
     weight_df: pd.DataFrame,
     other_df: pd.DataFrame,
@@ -404,20 +435,12 @@ def build_report_data(
 
     segment_date, segments, seg_diag = _find_latest_segment_snapshot(other_df)
 
-    # The printable history uses one real scan per calendar day. Withings can contain
-    # several complete measurements on the same day; showing all of them makes the
-    # compact InBody-style axis repeat the same date and is visually misleading.
-    # Keep the latest complete scan from each day (never an interpolated/averaged value).
-    daily = complete.copy()
-    daily["_scan_day"] = daily["Date"].dt.floor("D")
-    daily = (
-        daily.sort_values("Date")
-        .groupby("_scan_day", group_keys=False)
-        .tail(1)
-        .drop(columns=["_scan_day"])
-        .sort_values("Date")
-    )
-    history = daily.tail(8).copy().sort_values("Date", ascending=False)
+    # The printable history uses one representative complete scan per calendar day.
+    # The rule is user-selectable in the profile and affects only the recent history
+    # display; monthly medians continue to use all complete scans.
+    daily = _daily_history(complete, profile.history_daily_rule)
+    points = int(max(3, min(16, profile.history_points or 8)))
+    history = daily.tail(points).copy().sort_values("Date", ascending=False)
     history["Body fat %"] = history["Fat mass (kg)"] / history["Weight (kg)"] * 100
     monthly = _monthly_history(complete, scan_date)
 
@@ -425,6 +448,8 @@ def build_report_data(
     diag.update(seg_diag)
     diag["complete_scans"] = int(len(complete))
     diag["latest_complete_scan"] = scan_date
+    diag["history_daily_rule"] = profile.history_daily_rule
+    diag["history_points"] = int(max(3, min(16, profile.history_points or 8)))
 
     return ReportData(
         profile=profile,
@@ -547,64 +572,23 @@ def _segment_total(segments: Dict[str, SegmentValue], metric: str) -> Optional[f
 
 
 def _segment_body_svg(data: ReportData, metric: str) -> str:
-    """Polished five-region silhouette for the report's segmental panels.
+    """Continuous front-facing silhouette based on the user's clean reference image.
 
-    The colours identify body regions only. They do not encode a clinical normal/high/low
-    assessment because the Withings export does not provide validated regional reference
-    bands equivalent to InBody's segmental evaluation percentages.
+    The figure is intentionally one continuous body shape rather than assembled torso/
+    limb pieces. Regional values are communicated by the surrounding labels; colour
+    identifies the panel (muscle vs fat), not a normal/high/low clinical rating.
     """
     female = str(data.profile.sex).lower().startswith("f")
+    path_d = 'M 104.5 8.0 L 96.8 9.3 L 90.3 14.8 L 87.1 26.7 L 87.7 37.7 L 90.3 45.5 L 90.3 53.9 L 85.8 65.5 L 91.6 74.6 L 82.5 76.5 L 73.5 78.5 L 68.3 83.0 L 65.1 87.5 L 62.5 105.0 L 60.5 125.7 L 57.3 152.1 L 54.7 174.1 L 52.1 198.7 L 52.1 214.9 L 54.1 222.6 L 61.8 227.8 L 59.9 222.6 L 56.7 214.9 L 59.9 210.3 L 63.1 218.1 L 62.5 208.4 L 61.2 193.5 L 65.1 174.1 L 72.2 143.7 L 78.6 113.4 L 82.5 128.9 L 87.1 146.3 L 84.5 154.1 L 74.8 181.3 L 74.1 194.8 L 73.5 209.7 L 77.4 235.6 L 82.5 265.3 L 85.8 284.0 L 84.5 303.4 L 83.2 320.2 L 87.1 345.5 L 90.3 368.7 L 85.1 377.1 L 75.4 388.8 L 79.9 390.1 L 90.3 391.4 L 97.4 386.8 L 101.9 382.3 L 102.5 367.4 L 103.9 335.8 L 105.8 281.4 L 107.1 207.8 L 111.0 206.5 L 113.6 242.0 L 116.1 294.4 L 119.4 349.3 L 118.7 365.5 L 117.4 381.7 L 123.2 386.2 L 132.9 391.4 L 139.4 390.7 L 143.9 389.4 L 137.5 379.7 L 129.1 368.1 L 132.9 343.5 L 136.8 313.1 L 135.5 297.6 L 133.6 284.7 L 138.1 257.6 L 145.9 212.9 L 145.9 195.5 L 145.2 183.2 L 140.7 169.6 L 132.9 148.9 L 137.5 128.9 L 141.4 113.4 L 147.8 143.7 L 154.9 174.1 L 158.2 192.2 L 157.6 207.8 L 156.2 218.1 L 159.5 210.3 L 162.7 213.6 L 160.1 221.3 L 156.9 227.2 L 162.7 224.6 L 165.3 223.3 L 167.2 211.0 L 165.3 190.9 L 163.3 169.6 L 160.8 143.1 L 158.8 119.2 L 156.9 100.5 L 154.9 88.8 L 151.7 83.6 L 147.8 79.1 L 137.5 76.5 L 126.5 73.9 L 130.4 65.5 L 132.9 60.4 L 131.0 47.4 L 129.7 34.5 L 128.4 20.3 L 124.5 14.8 L 120.0 10.6 L 112.9 8.7 Z' if female else 'M 107.5 8.0 L 101.9 9.2 L 98.2 11.7 L 94.5 15.4 L 91.4 21.0 L 90.2 30.9 L 89.6 40.2 L 93.9 47.0 L 97.0 51.4 L 97.0 63.1 L 88.9 67.4 L 77.2 72.4 L 64.2 78.6 L 59.2 84.8 L 56.1 92.2 L 53.6 106.5 L 51.8 119.5 L 49.9 134.4 L 46.8 155.4 L 46.8 176.5 L 46.2 198.1 L 46.2 218.0 L 49.9 225.4 L 53.6 231.6 L 58.0 232.8 L 62.9 232.8 L 59.2 227.3 L 55.5 222.3 L 56.1 217.4 L 58.0 214.2 L 61.1 217.4 L 64.2 221.7 L 62.3 213.6 L 57.4 192.6 L 60.5 180.2 L 64.2 162.8 L 66.0 151.1 L 66.0 143.0 L 69.7 134.4 L 74.1 125.7 L 77.8 139.3 L 81.5 153.5 L 78.4 172.1 L 75.3 192.6 L 74.7 212.4 L 72.8 243.4 L 75.9 265.0 L 73.5 283.0 L 71.0 303.4 L 73.5 326.9 L 76.6 353.6 L 78.4 367.8 L 72.2 377.7 L 63.5 389.5 L 71.0 390.7 L 78.4 391.4 L 85.8 386.4 L 90.8 380.9 L 90.8 370.3 L 88.9 356.1 L 92.0 341.2 L 97.6 317.7 L 96.4 291.7 L 99.5 269.9 L 103.8 239.7 L 106.9 218.6 L 111.2 216.1 L 115.5 244.6 L 119.9 272.4 L 123.6 294.1 L 121.8 314.6 L 125.5 333.1 L 131.1 357.9 L 129.2 381.5 L 136.0 386.4 L 145.3 391.4 L 151.5 390.7 L 156.5 388.9 L 149.7 379.0 L 141.6 369.1 L 143.5 352.4 L 147.2 332.5 L 149.0 317.1 L 146.6 295.4 L 144.1 266.9 L 147.2 241.5 L 146.6 224.8 L 144.7 195.0 L 142.2 174.0 L 138.5 157.9 L 142.2 141.2 L 145.3 126.3 L 149.7 133.1 L 152.7 139.3 L 153.4 151.1 L 154.0 164.1 L 158.3 177.7 L 162.0 189.5 L 160.8 199.4 L 155.2 221.1 L 159.5 216.1 L 162.0 214.2 L 163.9 217.4 L 164.5 221.7 L 161.4 226.0 L 157.1 231.0 L 158.9 234.1 L 164.5 232.8 L 167.0 231.0 L 170.7 225.4 L 173.2 220.4 L 173.2 200.0 L 172.6 177.1 L 172.6 151.1 L 170.1 134.4 L 168.2 119.5 L 166.4 106.5 L 162.6 88.5 L 158.9 82.3 L 154.0 77.4 L 143.5 72.4 L 132.9 67.4 L 123.0 63.7 L 122.4 52.6 L 126.1 47.0 L 129.8 41.4 L 129.2 31.5 L 128.0 19.8 L 124.2 14.2 L 119.9 10.5 L 114.9 8.6 Z'
     if metric == "muscle":
-        torso, arm, leg = "#0f7fa9", "#1f9fbc", "#2aa99d"
-        torso2, arm2, leg2 = "#0a668d", "#1686a4", "#218d84"
+        c1, c2, edge = "#0f8fa9", "#0a6f8b", "#075d78"
     else:
-        # Intentionally softer than warning-orange: this is distribution, not a rating.
-        torso, arm, leg = "#d39a2f", "#dda947", "#cf8840"
-        torso2, arm2, leg2 = "#b98020", "#c68f35", "#b77333"
-
-    # Naturalised front-facing body. Pelvis and feet are continuous with the lower-body
-    # region so the figure no longer resembles an icon with white 'underwear'.
-    if female:
-        torso_path = "M88 79 C96 66 106 62 120 62 C134 62 144 66 152 79 C156 95 154 112 149 128 C146 141 149 157 158 176 C150 188 137 195 120 196 C103 195 90 188 82 176 C91 157 94 141 91 128 C86 112 84 95 88 79 Z"
-        hip_path = "M82 172 C91 186 103 194 120 195 C137 194 149 186 158 172 C160 187 157 200 151 213 C142 220 132 223 120 223 C108 223 98 220 89 213 C83 200 80 187 82 172 Z"
-        larm = "M89 81 C75 84 65 94 59 108 C53 124 49 143 44 160 L31 194 C27 205 31 214 40 214 C48 214 52 207 55 199 L68 169 C74 155 80 143 87 132 C94 121 98 108 101 95 Z"
-        rarm = "M151 81 C165 84 175 94 181 108 C187 124 191 143 196 160 L209 194 C213 205 209 214 200 214 C192 214 188 207 185 199 L172 169 C166 155 160 143 153 132 C146 121 142 108 139 95 Z"
-        lleg = "M90 208 C86 229 84 251 85 276 L88 325 C88 345 84 361 78 374 C75 381 80 386 90 386 C99 386 105 382 108 375 L112 326 L117 220 Z"
-        rleg = "M150 208 C154 229 156 251 155 276 L152 325 C152 345 156 361 162 374 C165 381 160 386 150 386 C141 386 135 382 132 375 L128 326 L123 220 Z"
-    else:
-        torso_path = "M82 78 C92 64 104 60 120 60 C136 60 148 64 158 78 C164 96 161 116 157 133 C153 151 143 169 132 184 C128 190 124 195 120 198 C116 195 112 190 108 184 C97 169 87 151 83 133 C79 116 76 96 82 78 Z"
-        hip_path = "M89 181 C98 190 108 197 120 199 C132 197 142 190 151 181 C154 194 153 205 149 216 C141 222 131 225 120 225 C109 225 99 222 91 216 C87 205 86 194 89 181 Z"
-        larm = "M84 82 C69 87 59 99 54 114 C49 130 45 149 40 165 L27 198 C23 209 27 218 36 218 C44 218 49 211 52 202 L65 171 C71 157 77 143 84 131 C92 118 97 105 101 92 Z"
-        rarm = "M156 82 C171 87 181 99 186 114 C191 130 195 149 200 165 L213 198 C217 209 213 218 204 218 C196 218 191 211 188 202 L175 171 C169 157 163 143 156 131 C148 118 143 105 139 92 Z"
-        lleg = "M91 211 C87 232 85 253 86 278 L89 327 C89 347 85 363 79 376 C76 383 81 388 91 388 C100 388 106 384 109 377 L113 328 L117 222 Z"
-        rleg = "M149 211 C153 232 155 253 154 278 L151 327 C151 347 155 363 161 376 C164 383 159 388 149 388 C140 388 134 384 131 377 L127 328 L123 222 Z"
-
+        c1, c2, edge = "#d8a12f", "#b97822", "#9a641d"
     uid = f"{metric}-{'f' if female else 'm'}"
     return f"""
-    <svg viewBox='0 0 240 400' class='segment-body-svg' role='img' aria-label='{metric.title()} regional body schematic'>
-      <defs>
-        <linearGradient id='head-{uid}' x1='0' y1='0' x2='0' y2='1'>
-          <stop offset='0' stop-color='#eef3f5'/><stop offset='1' stop-color='#cbd8dd'/>
-        </linearGradient>
-        <linearGradient id='torso-{uid}' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='{torso}'/><stop offset='1' stop-color='{torso2}'/></linearGradient>
-        <linearGradient id='arm-{uid}' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='{arm}'/><stop offset='1' stop-color='{arm2}'/></linearGradient>
-        <linearGradient id='leg-{uid}' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='{leg}'/><stop offset='1' stop-color='{leg2}'/></linearGradient>
-        <filter id='shadow-{uid}' x='-25%' y='-20%' width='150%' height='150%'><feDropShadow dx='0' dy='2' stdDeviation='2.0' flood-color='#5d7685' flood-opacity='.14'/></filter>
-      </defs>
-      <g filter='url(#shadow-{uid})' stroke='#ffffff' stroke-width='1.45' stroke-linejoin='round'>
-        <ellipse cx='120' cy='34' rx='20.5' ry='25.5' fill='url(#head-{uid})' stroke='#c8d4da'/>
-        <path d='M108 55 C111 63 111 69 108 75 L132 75 C129 69 129 63 132 55 Z' fill='#d8e2e6' stroke='#cbd6dc'/>
-        <path d='{larm}' fill='{arm}'/>
-        <path d='{rarm}' fill='{arm}'/>
-        <path d='{torso_path}' fill='{torso}'/>
-        <path d='{hip_path}' fill='{leg}'/>
-        <path d='{lleg}' fill='{leg}'/>
-        <path d='{rleg}' fill='{leg}'/>
-      </g>
-      <g fill='none' stroke='rgba(255,255,255,.38)' stroke-width='1.0'>
-        <path d='M91 112 C108 118 132 118 149 112'/>
-        <path d='M91 163 C108 169 132 169 149 163'/>
-      </g>
+    <svg viewBox='0 0 220 400' class='segment-body-svg' role='img' aria-label='{metric.title()} regional body silhouette'>
+      <path d='{path_d}' fill='{c1}' stroke='{edge}' stroke-width='1.05'
+            stroke-linejoin='round'/>
     </svg>"""
 
 
@@ -681,9 +665,9 @@ def _history_panel(data: ReportData) -> str:
     h = data.history.copy().sort_values("Date")
     if h.empty:
         return "<div class='history-empty'>No complete scan history.</div>"
-    # build_report_data already reduces multiple same-day measurements to the latest
-    # actual complete scan from that day. Keep up to eight unique calendar days.
-    h = h.tail(8)
+    # build_report_data already reduces multiple same-day measurements according to
+    # the profile-selected daily rule. Keep the configured number of measured days.
+    h = h.tail(int(max(3, min(16, data.profile.history_points or 8))))
     dates=[pd.Timestamp(d).strftime('%d %b') for d in h['Date']]
     weights=[float(v) for v in h['Weight (kg)']]
     muscle=[float(v) for v in h['Muscle mass (kg)']]
@@ -705,7 +689,7 @@ def _history_panel(data: ReportData) -> str:
         {row('Muscle Mass','kg',muscle,latest_monthly('Muscle mass (kg)',' kg'))}
         {row('Body Fat','%',fat,latest_monthly('Body fat %','%'))}
         <div class='ih-dates'><div></div><div class='ih-date-grid' style='grid-template-columns:repeat({len(dates)},1fr)'>{date_cells}</div></div>
-        <div class='ih-note'>Latest complete scan from each of the most recent {len(dates)} measured days. Monthly medians remain gap-aware and are not interpolated.</div>
+        <div class='ih-note'>{escape(data.profile.history_daily_rule)} for each of the most recent {len(dates)} measured days. Monthly medians use all complete scans, remain gap-aware, and are not interpolated.</div>
       </div>"""
 
 

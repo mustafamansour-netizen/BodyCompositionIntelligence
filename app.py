@@ -78,6 +78,20 @@ with st.sidebar:
     use_goal = st.checkbox("Show personal goal", value=True)
     goal = st.number_input("Goal weight (kg)", min_value=35.0, max_value=200.0, value=82.0, step=0.5, disabled=not use_goal)
 
+    st.markdown("#### History display")
+    history_daily_rule = st.selectbox(
+        "Daily history reading",
+        ["Earliest complete scan", "Latest complete scan", "Daily median"],
+        index=0,
+        help="Chooses the one value shown for each measured day. Monthly medians are always calculated from all complete scans.",
+    )
+    history_points = st.select_slider(
+        "History points shown",
+        options=[6, 8, 10, 12],
+        value=8,
+        help="Number of measured days shown in the compact Body Composition History panel.",
+    )
+
     base = default_bands(sex)
     with st.expander("Reference bands", expanded=False):
         st.caption("Defaults reproduce the reference bands used in the approved report. Adjust here if your Withings reference profile differs.")
@@ -112,6 +126,8 @@ profile = Profile(
     birth_date=dob,
     age_override=age_override,
     goal_weight_kg=float(goal) if use_goal else None,
+    history_daily_rule=history_daily_rule,
+    history_points=int(history_points),
 )
 
 try:
