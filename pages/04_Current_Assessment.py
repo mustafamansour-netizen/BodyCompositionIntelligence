@@ -60,4 +60,67 @@ if weight_file:
 
     col1.metric(
         "Weight",
-        f"{weight
+        f"{weight:.1f} kg"
+    )
+
+    col2.metric(
+        "Body Fat %",
+        f"{fat_pct:.1f}%"
+    )
+
+    col3.metric(
+        "Fat Mass",
+        f"{fat:.1f} kg"
+    )
+
+    col4.metric(
+        "Muscle",
+        f"{muscle:.1f} kg"
+    )
+
+    col5.metric(
+        "Water %",
+        f"{water_pct:.1f}%"
+    )
+
+    col6.metric(
+        "BMI",
+        f"{bmi:.1f}"
+    )
+
+    st.divider()
+
+    st.subheader("Current Body Composition")
+
+    summary = pd.DataFrame(
+        {
+            "Metric": [
+                "Weight",
+                "Fat Mass",
+                "Fat Free Mass",
+                "Muscle Mass",
+                "Bone Mass",
+                "Hydration"
+            ],
+            "Value": [
+                round(weight, 2),
+                round(fat, 2),
+                round(fat_free, 2),
+                round(muscle, 2),
+                round(bone, 2),
+                round(hydration, 2)
+            ]
+        }
+    )
+
+    st.dataframe(
+        summary,
+        use_container_width=True,
+        hide_index=True
+    )
+
+else:
+
+    st.info(
+        "Upload weight.csv to display the latest assessment."
+    )
