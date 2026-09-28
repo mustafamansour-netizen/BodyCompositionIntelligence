@@ -8,15 +8,20 @@ st.set_page_config(
 
 st.title("📋 Executive Report")
 
-weight_file = st.file_uploader(
-    "Upload weight.csv",
-    type=["csv"]
+if (
+"weight_df" not in st.session_state
+or
+"other_df" not in st.session_state
+):
+ 
+st.warning(
+"Please load files in Import page first."
 )
-
-other_file = st.file_uploader(
-    "Upload other.csv",
-    type=["csv"]
-)
+ 
+st.stop()
+ 
+weight_df = st.session_state["weight_df"]
+other_df = st.session_state["other_df"]
 
 if weight_file and other_file:
 
