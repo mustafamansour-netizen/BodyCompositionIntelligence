@@ -403,7 +403,7 @@ def build_report_data(
     bands = bands or default_bands(profile.sex)
 
     segment_date, segments, seg_diag = _find_latest_segment_snapshot(other_df)
-    history = complete.tail(6).copy().sort_values("Date", ascending=False)
+    history = complete.tail(8).copy().sort_values("Date", ascending=False)
     history["Body fat %"] = history["Fat mass (kg)"] / history["Weight (kg)"] * 100
     monthly = _monthly_history(complete, scan_date)
 
@@ -526,160 +526,168 @@ def _segment_metric_value(seg: SegmentValue, metric: str) -> Optional[float]:
     return seg.muscle_kg if metric == "muscle" else seg.fat_kg
 
 
-def _segment_metric_colors(segments: Dict[str, SegmentValue], metric: str) -> Dict[str, str]:
-    base = "#1688a6" if metric == "muscle" else "#d79a45"
-    values = {
-        pos: _segment_metric_value(seg, metric)
-        for pos, seg in segments.items()
-        if _segment_metric_value(seg, metric) is not None
-    }
-    finite = [float(v) for v in values.values() if v is not None and float(v) >= 0]
-    if not finite:
-        return {p: "#dfe7eb" for p in segments}
-    vmax = max(finite) or 1.0
-    out = {}
-    for pos in segments:
-        v = values.get(pos)
-        if v is None:
-            out[pos] = "#e6ecef"
-        else:
-            # Intensity represents only regional share within this scan. It is not a reference range.
-            t = max(0.0, min(1.0, float(v) / vmax))
-            out[pos] = _mix("#edf2f4", base, 0.26 + 0.70 * (t ** 0.72))
-    return out
+def _segment_total(segments: Dict[str, SegmentValue], metric: str) -> Optional[float]:
+    values = [_segment_metric_value(v, metric) for v in segments.values()]
+    values = [float(v) for v in values if v is not None and not math.isnan(float(v))]
+    return sum(values) if values else None
 
 
 def _segment_body_svg(data: ReportData, metric: str) -> str:
-    c = _segment_metric_colors(data.segments, metric)
-    la, ra, torso, ll, rl = [c.get(x, "#dfe7eb") for x in ["Left Arm", "Right Arm", "Torso", "Left Leg", "Right Leg"]]
+    """Smooth infographic-style body silhouette with five independently colored regions.
+
+    Colors are purely anatomical/visual and deliberately do not imply a clinical rating.
+    """
     female = str(data.profile.sex).lower().startswith("f")
-    if female:
-        torso_path = "M84 58 C90 50 99 47 110 47 C121 47 130 50 136 58 C139 72 138 88 133 104 C130 114 132 126 141 142 C132 150 121 154 110 154 C99 154 88 150 79 142 C88 126 90 114 87 104 C82 88 81 72 84 58 Z"
-        pelvis_path = "M80 141 C89 149 99 153 110 153 C121 153 131 149 140 141 L136 165 C127 171 120 174 110 174 C100 174 93 171 84 165 Z"
+    if metric == "muscle":
+        torso, arm, leg = "#168ac0", "#22a6c8", "#27ae9f"
+        torso2, arm2, leg2 = "#0c6f9f", "#168faf", "#1c8f83"
     else:
-        torso_path = "M80 58 C88 49 98 46 110 46 C122 46 132 49 140 58 C144 75 143 94 138 111 C134 127 124 141 110 148 C96 141 86 127 82 111 C77 94 76 75 80 58 Z"
-        pelvis_path = "M83 142 C92 148 101 151 110 151 C119 151 128 148 137 142 L135 166 C126 171 118 174 110 174 C102 174 94 171 85 166 Z"
-    # Smooth, neutral medical-style silhouette with independently shaded regions.
+        torso, arm, leg = "#ee8b2d", "#f3a13a", "#e66d32"
+        torso2, arm2, leg2 = "#cf6f1b", "#dc8524", "#c95528"
+
+    if female:
+        torso_path = "M88 74 C96 62 105 58 120 58 C135 58 144 62 152 74 C156 92 154 108 148 125 C145 136 148 150 160 169 C150 180 136 186 120 186 C104 186 90 180 80 169 C92 150 95 136 92 125 C86 108 84 92 88 74 Z"
+        pelvis_path = "M81 165 C92 176 105 182 120 182 C135 182 148 176 159 165 L154 196 C143 204 132 208 120 208 C108 208 97 204 86 196 Z"
+    else:
+        torso_path = "M82 75 C92 61 104 57 120 57 C136 57 148 61 158 75 C164 95 161 118 155 139 C149 158 136 174 120 183 C104 174 91 158 85 139 C79 118 76 95 82 75 Z"
+        pelvis_path = "M87 176 C98 184 109 188 120 188 C131 188 142 184 153 176 L150 201 C140 207 130 211 120 211 C110 211 100 207 90 201 Z"
+
+    uid = f"{metric}-{'f' if female else 'm'}"
     return f"""
-    <svg viewBox='0 0 220 320' class='segment-body-svg' role='img' aria-label='{metric.title()} regional distribution body schematic'>
+    <svg viewBox='0 0 240 390' class='segment-body-svg' role='img' aria-label='{metric.title()} regional body schematic'>
       <defs>
-        <linearGradient id='head-{metric}' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='#edf1f3'/><stop offset='1' stop-color='#cfd8dd'/></linearGradient>
-        <filter id='shadow-{metric}' x='-20%' y='-20%' width='140%' height='140%'><feDropShadow dx='0' dy='1.4' stdDeviation='2.0' flood-color='#6e8795' flood-opacity='.16'/></filter>
+        <linearGradient id='head-{uid}' x1='0' y1='0' x2='0' y2='1'>
+          <stop offset='0' stop-color='#e9eff2'/><stop offset='1' stop-color='#c7d3d9'/>
+        </linearGradient>
+        <linearGradient id='torso-{uid}' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='{torso}'/><stop offset='1' stop-color='{torso2}'/></linearGradient>
+        <linearGradient id='arm-{uid}' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='{arm}'/><stop offset='1' stop-color='{arm2}'/></linearGradient>
+        <linearGradient id='leg-{uid}' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='{leg}'/><stop offset='1' stop-color='{leg2}'/></linearGradient>
+        <filter id='shadow-{uid}' x='-25%' y='-20%' width='150%' height='150%'><feDropShadow dx='0' dy='2' stdDeviation='2.2' flood-color='#5d7685' flood-opacity='.18'/></filter>
       </defs>
-      <g filter='url(#shadow-{metric})' stroke='#cbd6dc' stroke-width='1.15' stroke-linejoin='round'>
-        <ellipse cx='110' cy='27' rx='17' ry='20' fill='url(#head-{metric})'/>
-        <path d='M102 45 C104 51 104 54 102 59 L118 59 C116 54 116 51 118 45 Z' fill='#dde5e9'/>
-        <path d='{torso_path}' fill='{torso}'/>
-        <path d='M82 63 C68 67 60 77 55 91 L34 151 C30 162 34 169 41 168 C47 168 50 163 53 155 L73 111 C78 101 84 93 88 86 Z' fill='{la}'/>
-        <path d='M138 63 C152 67 160 77 165 91 L186 151 C190 162 186 169 179 168 C173 168 170 163 167 155 L147 111 C142 101 136 93 132 86 Z' fill='{ra}'/>
-        <path d='{pelvis_path}' fill='#dfe6e9'/>
-        <path d='M87 165 C80 190 79 216 82 248 L78 294 C77 305 82 311 90 310 L100 306 L103 248 L108 174 Z' fill='{ll}'/>
-        <path d='M133 165 C140 190 141 216 138 248 L142 294 C143 305 138 311 130 310 L120 306 L117 248 L112 174 Z' fill='{rl}'/>
-        <path d='M78 293 C74 302 68 307 61 311 L91 311 L91 304 Z' fill='#dce4e8'/>
-        <path d='M142 293 C146 302 152 307 159 311 L129 311 L129 304 Z' fill='#dce4e8'/>
+      <g filter='url(#shadow-{uid})' stroke='#ffffff' stroke-width='2.0' stroke-linejoin='round'>
+        <ellipse cx='120' cy='33' rx='21' ry='25' fill='url(#head-{uid})' stroke='#c8d4da'/>
+        <path d='M109 55 C111 62 111 68 108 73 L132 73 C129 68 129 62 131 55 Z' fill='#d7e0e4' stroke='#cbd6dc'/>
+        <path d='{torso_path}' fill='url(#torso-{uid})'/>
+        <path d='M85 78 C68 84 57 98 51 116 L27 185 C23 197 27 205 36 205 C44 205 48 198 51 190 L75 136 C82 120 89 111 96 101 Z' fill='{arm}'/>
+        <path d='M155 78 C172 84 183 98 189 116 L213 185 C217 197 213 205 204 205 C196 205 192 198 189 190 L165 136 C158 120 151 111 144 101 Z' fill='{arm}'/>
+        <path d='{pelvis_path}' fill='{leg}' stroke='#ffffff'/>
+        <path d='M91 198 C84 228 83 260 87 302 L83 355 C82 369 88 376 98 375 L109 370 L111 302 L117 208 Z' fill='{leg}'/>
+        <path d='M149 198 C156 228 157 260 153 302 L157 355 C158 369 152 376 142 375 L131 370 L129 302 L123 208 Z' fill='{leg}'/>
+        <path d='M83 353 C78 365 69 371 58 377 L100 377 L99 367 Z' fill='#dce4e8' stroke='#cbd6dc'/>
+        <path d='M157 353 C162 365 171 371 182 377 L140 377 L141 367 Z' fill='#dce4e8' stroke='#cbd6dc'/>
+      </g>
+      <g fill='none' stroke='rgba(255,255,255,.44)' stroke-width='1.1'>
+        <path d='M92 104 C109 111 131 111 148 104'/>
+        <path d='M94 148 C111 154 129 154 146 148'/>
+        <path d='M90 248 C98 251 104 252 110 251'/>
+        <path d='M130 251 C136 252 142 251 150 248'/>
       </g>
     </svg>"""
 
 
-def _segment_label(position: str, value: Optional[float], align: str = "left") -> str:
-    return f"""<div class='map-label {align}'><span>{escape(position.upper())}</span><b>{fmt_num(value,1,' kg')}</b></div>"""
+def _segment_label(position: str, value: Optional[float], share: Optional[float], side: str = "left") -> str:
+    share_text = f"{share:.1f}% of segment total" if share is not None else ""
+    return f"""<div class='seg-readout {side}'>
+      <span class='seg-name'>{escape(position.upper())}</span>
+      <b>{fmt_num(value,1,' kg')}</b>
+      <small>{share_text}</small>
+    </div>"""
 
 
-def _segment_map(data: ReportData, metric: str) -> str:
+def _segment_analysis_panel(data: ReportData, metric: str) -> str:
     seg = data.segments
     la, ra = seg.get("Left Arm", SegmentValue()), seg.get("Right Arm", SegmentValue())
     ll, rl = seg.get("Left Leg", SegmentValue()), seg.get("Right Leg", SegmentValue())
     torso = seg.get("Torso", SegmentValue())
     getv = lambda x: _segment_metric_value(x, metric)
-    title = "MUSCLE DISTRIBUTION" if metric == "muscle" else "FAT DISTRIBUTION"
-    accent = "muscle" if metric == "muscle" else "fat"
+    total = _segment_total(seg, metric)
+    share = lambda v: (float(v) / total * 100.0) if (v is not None and total and total > 0) else None
+    if metric == "muscle":
+        title, subtitle, cls = "SEGMENTAL MUSCLE ANALYSIS", "Withings regional muscle mass", "muscle"
+        balance = f"Arm L/R difference: {fmt_num(_balance(getv(la), getv(ra)),1,'%')} &nbsp;&nbsp; | &nbsp;&nbsp; Leg L/R difference: {fmt_num(_balance(getv(ll), getv(rl)),1,'%')}"
+    else:
+        title, subtitle, cls = "SEGMENTAL FAT ANALYSIS", "Withings regional fat mass", "fat"
+        balance = f"Segment total: {fmt_num(total,1,' kg')} &nbsp;&nbsp; • &nbsp;&nbsp; percentage = share of measured segment total"
     return f"""
-      <div class='map-panel {accent}'>
-        <div class='map-head'><b>{title}</b><span>regional mass</span></div>
-        <div class='map-content'>
-          <div class='map-side left-side'>
-            {_segment_label('Left Arm', getv(la), 'right')}
-            {_segment_label('Left Leg', getv(ll), 'right')}
+      <div class='seg-panel {cls}'>
+        <div class='seg-panel-head'><div><b>{title}</b><span>{subtitle}</span></div></div>
+        <div class='seg-panel-body'>
+          <div class='seg-side seg-left'>
+            {_segment_label('Left Arm', getv(la), share(getv(la)), 'right')}
+            {_segment_label('Left Leg', getv(ll), share(getv(ll)), 'right')}
           </div>
-          <div class='map-center'>
-            <div class='torso-chip'><span>TORSO</span><b>{fmt_num(getv(torso),1,' kg')}</b></div>
+          <div class='seg-figure'>
+            <div class='seg-torso'><span>TORSO</span><b>{fmt_num(getv(torso),1,' kg')}</b><small>{(f'{share(getv(torso)):.1f}% of segment total' if share(getv(torso)) is not None else '')}</small></div>
             {_segment_body_svg(data, metric)}
           </div>
-          <div class='map-side right-side'>
-            {_segment_label('Right Arm', getv(ra), 'left')}
-            {_segment_label('Right Leg', getv(rl), 'left')}
+          <div class='seg-side seg-right'>
+            {_segment_label('Right Arm', getv(ra), share(getv(ra)), 'left')}
+            {_segment_label('Right Leg', getv(rl), share(getv(rl)), 'left')}
           </div>
         </div>
+        <div class='seg-panel-foot'>{balance}</div>
       </div>"""
 
 
-def _balance_card(title: str, left: Optional[float], right: Optional[float]) -> str:
-    diff = _balance(left, right)
-    if left is None or right is None:
-        return f"<div class='balance-card'><div class='balance-title'>{escape(title)}</div><div class='balance-missing'>No paired muscle values</div></div>"
-    mx = max(left, right, 0.0001)
-    lw = left / mx * 100
-    rw = right / mx * 100
-    return f"""
-      <div class='balance-card'>
-        <div class='balance-head'><b>{escape(title)}</b><span>{fmt_num(diff,1,'%')} difference</span></div>
-        <div class='balance-values'><span>L&nbsp; <b>{left:.1f} kg</b></span><span>R&nbsp; <b>{right:.1f} kg</b></span></div>
-        <div class='balance-track'><div class='balance-half left'><i style='width:{lw:.1f}%'></i></div><em></em><div class='balance-half right'><i style='width:{rw:.1f}%'></i></div></div>
-      </div>"""
-
-
-def _sparkline_svg(values: List[Optional[float]], width=250, height=58) -> str:
-    arr = np.array([np.nan if v is None else float(v) for v in values], dtype=float)
+def _history_track(values: List[float], color: str = "#1c3f52", width: int = 620, height: int = 86) -> str:
+    if not values:
+        return f"<svg viewBox='0 0 {width} {height}' class='history-svg'></svg>"
+    arr = np.asarray(values, dtype=float)
     finite = arr[np.isfinite(arr)]
     if finite.size == 0:
-        return f"<svg viewBox='0 0 {width} {height}' class='spark'></svg>"
-    ymin, ymax = float(finite.min()), float(finite.max())
-    if math.isclose(ymin, ymax):
-        ymin -= 1.0
-        ymax += 1.0
-    pad_y = (ymax - ymin) * 0.18
-    ymin -= pad_y
-    ymax += pad_y
+        return f"<svg viewBox='0 0 {width} {height}' class='history-svg'></svg>"
+    lo, hi = float(finite.min()), float(finite.max())
+    if math.isclose(lo, hi):
+        lo -= 1.0; hi += 1.0
+    pad = max((hi-lo)*0.34, 0.4)
+    lo -= pad; hi += pad
     n = len(arr)
-    xs = np.linspace(7, width - 7, n) if n > 1 else np.array([width / 2])
-    def y(v):
-        return height - 7 - (v - ymin) / (ymax - ymin) * (height - 14)
-
-    segments = []
-    current = []
-    circles = []
-    for x, v in zip(xs, arr):
-        if np.isfinite(v):
-            current.append((x, y(v)))
-            circles.append(f"<circle cx='{x:.1f}' cy='{y(v):.1f}' r='2.4' fill='#1182ba'/>")
-        else:
-            if len(current) >= 2:
-                segments.append(current)
-            current = []
-    if len(current) >= 2:
-        segments.append(current)
-
-    paths = []
-    for seg in segments:
-        pts = " ".join(f"{x:.1f},{yy:.1f}" for x, yy in seg)
-        paths.append(f"<polyline points='{pts}' fill='none' stroke='#1182ba' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/>")
-
-    return f"<svg viewBox='0 0 {width} {height}' class='spark'><line x1='6' x2='{width-6}' y1='{height-7}' y2='{height-7}' stroke='#e7edf1' stroke-width='1'/>{''.join(paths)}{''.join(circles)}</svg>"
+    xs = np.linspace(24, width-24, n) if n > 1 else np.array([width/2])
+    def yy(v):
+        return height - 18 - (v-lo)/(hi-lo)*(height-39)
+    pts=[]; dots=[]; labels=[]
+    for x,v in zip(xs,arr):
+        y=yy(float(v)); pts.append(f"{x:.1f},{y:.1f}")
+        dots.append(f"<circle cx='{x:.1f}' cy='{y:.1f}' r='3.5' fill='{color}'/>")
+        labels.append(f"<text x='{x:.1f}' y='{max(11,y-8):.1f}' text-anchor='middle' class='hval'>{v:.1f}</text>")
+    grid = ''.join(f"<line x1='{x:.1f}' x2='{x:.1f}' y1='18' y2='{height-13}' class='hgrid'/>" for x in xs)
+    return f"""<svg viewBox='0 0 {width} {height}' class='history-svg' preserveAspectRatio='none'>
+      {grid}<line x1='12' x2='{width-12}' y1='{height-14}' y2='{height-14}' class='hbase'/>
+      <polyline points='{' '.join(pts)}' fill='none' stroke='{color}' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/>
+      {''.join(dots)}{''.join(labels)}
+    </svg>"""
 
 
-def _history_chart(monthly: pd.DataFrame, col: str, title: str, suffix: str, decimals=1) -> str:
-    vals = [None if pd.isna(v) else float(v) for v in monthly[col].tolist()]
-    finite = [v for v in vals if v is not None]
-    latest = finite[-1] if finite else None
-    first_label = monthly["Month"].iloc[0].strftime("%b %y") if len(monthly) else ""
-    last_label = monthly["Month"].iloc[-1].strftime("%b %y") if len(monthly) else ""
-    gap_note = "gaps = no valid scan" if any(v is None for v in vals) else "monthly medians"
+def _history_panel(data: ReportData) -> str:
+    h = data.history.copy().sort_values("Date")
+    if h.empty:
+        return "<div class='history-empty'>No complete scan history.</div>"
+    # Keep the last eight actual complete scans, matching the compact InBody-style history layout.
+    h = h.tail(8)
+    dates=[pd.Timestamp(d).strftime('%d %b') for d in h['Date']]
+    weights=[float(v) for v in h['Weight (kg)']]
+    muscle=[float(v) for v in h['Muscle mass (kg)']]
+    fat=[float(v) for v in h['Body fat %']]
+
+    def latest_monthly(col, suffix):
+        vals=[float(v) for v in data.monthly[col].tolist() if not pd.isna(v)]
+        return (f"{vals[-1]:.1f}{suffix}" if vals else "-")
+
+    def row(label, sublabel, vals, median_text):
+        return f"""<div class='ih-row'>
+          <div class='ih-label'><b>{label}</b><span>{sublabel}</span><small>Latest monthly median&nbsp; {median_text}</small></div>
+          <div class='ih-plot'>{_history_track(vals)}</div>
+        </div>"""
+
+    date_cells=''.join(f"<span><b>{escape(d.split()[0])}</b><small>{escape(d.split()[1]) if len(d.split())>1 else ''}</small></span>" for d in dates)
     return f"""
-    <div class='trend-block'>
-      <div class='trend-title'><span>{escape(title)}</span><strong>{fmt_num(latest,decimals)}{suffix}</strong></div>
-      {_sparkline_svg(vals)}
-      <div class='trend-axis'><span>{first_label}</span><span>{escape(gap_note)}</span><span>{last_label}</span></div>
-    </div>"""
+      <div class='ih-wrap'>
+        {row('Weight','kg',weights,latest_monthly('Weight (kg)',' kg'))}
+        {row('Muscle Mass','kg',muscle,latest_monthly('Muscle mass (kg)',' kg'))}
+        {row('Body Fat','%',fat,latest_monthly('Body fat %','%'))}
+        <div class='ih-dates'><div></div><div class='ih-date-grid' style='grid-template-columns:repeat({len(dates)},1fr)'>{date_cells}</div></div>
+        <div class='ih-note'>Recent {len(dates)} complete whole-body scans shown. Monthly medians remain gap-aware and are not interpolated.</div>
+      </div>"""
 
 
 def _value_or_dash(v: Optional[float], decimals=1) -> str:
@@ -710,15 +718,6 @@ def render_report_html(data: ReportData, standalone: bool = True) -> str:
 
     bmi_lo_w = data.bands.bmi[0] * data.profile.height_m ** 2
     bmi_hi_w = data.bands.bmi[1] * data.profile.height_m ** 2
-
-    hist_rows = []
-    for _, r in data.history.iterrows():
-        hist_rows.append(
-            f"<tr><td>{pd.Timestamp(r['Date']).strftime('%d %b')}</td>"
-            f"<td>{float(r['Weight (kg)']):.1f}</td>"
-            f"<td>{float(r['Body fat %']):.1f}</td>"
-            f"<td>{float(r['Muscle mass (kg)']):.1f}</td></tr>"
-        )
 
     seg = data.segments
     la, ra = seg.get("Left Arm", SegmentValue()), seg.get("Right Arm", SegmentValue())
@@ -819,51 +818,50 @@ html,body {{ margin:0; padding:0; background:#eef3f6; font-family: Arial, Helvet
 .segment-card {{ margin-bottom:2.6mm; }}
 .section-title.split {{ display:flex; justify-content:space-between; align-items:center; }}
 .section-title.split small {{ font-size:5pt; font-weight:600; opacity:.86; letter-spacing:0; }}
-.segment-wrap {{ height:57mm; padding:2mm 2.4mm 1.2mm; }}
-.segment-maps {{ display:grid; grid-template-columns:1fr 1fr; gap:2.4mm; height:39.5mm; }}
-.map-panel {{ border:1px solid #e0e9ee; border-radius:1.8mm; background:linear-gradient(180deg,#fbfdfe 0%,#f7fafb 100%); overflow:hidden; }}
-.map-panel.muscle {{ box-shadow:inset 0 .65mm 0 #1688a6; }}
-.map-panel.fat {{ box-shadow:inset 0 .65mm 0 #d79a45; }}
-.map-head {{ height:5.1mm; padding:1.1mm 2mm .7mm; display:flex; justify-content:space-between; align-items:center; color:#315e78; }}
-.map-head b {{ font-size:5.8pt; letter-spacing:.15px; }}
-.map-head span {{ font-size:4.4pt; color:#8998a1; }}
-.map-panel.muscle .map-head b {{ color:#0b718e; }} .map-panel.fat .map-head b {{ color:#a96d1e; }}
-.map-content {{ display:grid; grid-template-columns:1fr 26mm 1fr; align-items:center; height:33.3mm; padding:0 1.4mm 1mm; }}
-.map-side {{ height:25mm; display:flex; flex-direction:column; justify-content:space-between; }}
-.map-label {{ font-size:4.8pt; line-height:1.15; color:#607988; }}
-.map-label span {{ display:block; font-size:4.3pt; font-weight:800; color:#738691; margin-bottom:.55mm; }}
-.map-label b {{ display:block; color:#00578c; font-size:6.1pt; }}
-.map-label.right {{ text-align:right; padding-right:1.4mm; }} .map-label.left {{ text-align:left; padding-left:1.4mm; }}
-.map-center {{ position:relative; height:32mm; display:flex; justify-content:center; align-items:flex-end; }}
-.segment-body-svg {{ width:20mm; height:29.5mm; display:block; }}
-.torso-chip {{ position:absolute; top:-.4mm; left:50%; transform:translateX(-50%); z-index:2; min-width:20mm; text-align:center; background:rgba(255,255,255,.90); border:1px solid #e2eaee; border-radius:1.3mm; padding:.55mm 1mm .5mm; line-height:1.05; }}
-.torso-chip span {{ display:block; color:#718590; font-size:4pt; font-weight:800; }}
-.torso-chip b {{ display:block; color:#00578c; font-size:5.8pt; margin-top:.35mm; }}
-.balance-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:2.4mm; margin-top:1.6mm; }}
-.balance-card {{ height:10.2mm; border:1px solid #e1e9ed; border-radius:1.5mm; padding:1.1mm 1.8mm 1mm; background:#fbfcfd; }}
-.balance-head {{ display:flex; justify-content:space-between; align-items:center; font-size:4.6pt; color:#667d8b; line-height:1; }}
-.balance-head b {{ color:#315e78; font-size:5pt; }}
-.balance-head span {{ color:#00578c; font-weight:800; }}
-.balance-values {{ display:flex; justify-content:space-between; margin-top:.9mm; font-size:4.7pt; color:#6e808b; }}
-.balance-values b {{ color:#00578c; }}
-.balance-track {{ display:grid; grid-template-columns:1fr .45mm 1fr; gap:.8mm; align-items:center; height:2.1mm; margin-top:.45mm; }}
-.balance-track em {{ width:.45mm; height:3.2mm; background:#b7c6ce; border-radius:.4mm; }}
-.balance-half {{ height:1.7mm; background:#edf2f5; border-radius:1mm; display:flex; align-items:center; overflow:hidden; }}
-.balance-half.left {{ justify-content:flex-end; }} .balance-half.right {{ justify-content:flex-start; }}
-.balance-half i {{ display:block; height:100%; background:#1785a5; border-radius:1mm; }}
-.balance-missing {{ margin-top:2mm; font-size:4.7pt; color:#87969e; }}
-.segment-note {{ text-align:center; margin-top:.75mm; font-size:4.15pt; color:#7d8d96; }}
-.bottom-grid {{ display:grid; grid-template-columns:1.16fr 1.02fr .95fr; gap:2.2mm; }}
-.bottom-card {{ height:119mm; }}
-.history-inner {{ padding:1.3mm 2.3mm; }}
-table.hist {{ width:100%; border-collapse:collapse; font-size:5.5pt; color:#315b77; margin-bottom:1mm; }}
-table.hist th {{ text-align:left; font-size:5.2pt; color:#667d8d; font-weight:700; padding:.5mm 0; }}
-table.hist td {{ padding:.35mm 0; }} table.hist td:not(:first-child), table.hist th:not(:first-child) {{ text-align:right; }}
-.trend-block {{ margin-top:.8mm; }}
-.trend-title {{ display:flex; justify-content:space-between; font-size:5.4pt; font-weight:700; color:#446b84; line-height:1; }}
-.trend-title strong {{ color:#00578c; }}
-.spark {{ display:block; width:100%; height:14mm; }}
-.trend-axis {{ display:flex; justify-content:space-between; margin-top:-1.3mm; font-size:4.2pt; color:#8a98a1; }}
+.segment-wrap {{ height:66mm; padding:1.8mm 2.2mm 1.4mm; }}
+.segment-panels {{ display:grid; grid-template-columns:1fr 1fr; gap:2.4mm; height:61.5mm; }}
+.seg-panel {{ border:1px solid #d7e2e8; background:#f3f7f9; min-width:0; position:relative; overflow:hidden; }}
+.seg-panel.muscle {{ box-shadow:inset 0 .8mm 0 #168ac0; }}
+.seg-panel.fat {{ box-shadow:inset 0 .8mm 0 #ee8b2d; }}
+.seg-panel-head {{ height:8.2mm; padding:1.7mm 2mm 1.1mm; background:#e8f0f4; display:flex; align-items:center; }}
+.seg-panel-head b {{ display:block; font-size:6.9pt; color:#395a6c; line-height:1; }}
+.seg-panel.muscle .seg-panel-head b {{ color:#08739e; }} .seg-panel.fat .seg-panel-head b {{ color:#b96619; }}
+.seg-panel-head span {{ display:block; margin-top:.7mm; font-size:4.4pt; color:#788c98; }}
+.seg-panel-body {{ height:47mm; display:grid; grid-template-columns:1fr 30mm 1fr; align-items:center; padding:.7mm 1.5mm 0; }}
+.seg-side {{ height:35.5mm; display:flex; flex-direction:column; justify-content:space-between; padding-top:4mm; padding-bottom:3mm; }}
+.seg-readout {{ color:#5f7786; line-height:1.1; }}
+.seg-readout.right {{ text-align:right; padding-right:1.2mm; }} .seg-readout.left {{ text-align:left; padding-left:1.2mm; }}
+.seg-name {{ display:block; font-size:4.4pt; font-weight:800; color:#607887; letter-spacing:.1px; }}
+.seg-readout b {{ display:block; font-size:7.4pt; margin-top:.7mm; color:#154f70; }}
+.seg-panel.muscle .seg-readout b {{ color:#08739e; }} .seg-panel.fat .seg-readout b {{ color:#b96619; }}
+.seg-readout small {{ display:block; margin-top:.5mm; font-size:3.8pt; color:#8a99a2; white-space:nowrap; }}
+.seg-figure {{ position:relative; height:46mm; display:flex; justify-content:center; align-items:flex-end; }}
+.segment-body-svg {{ width:29mm; height:45mm; display:block; }}
+.seg-torso {{ position:absolute; top:1mm; left:50%; transform:translateX(-50%); z-index:3; width:29mm; text-align:center; line-height:1.03; background:rgba(255,255,255,.88); border:1px solid rgba(197,211,219,.85); padding:.7mm .8mm .6mm; }}
+.seg-torso span {{ display:block; font-size:4pt; color:#6f838e; font-weight:800; }}
+.seg-torso b {{ display:block; font-size:7.2pt; margin-top:.45mm; color:#154f70; }}
+.seg-panel.muscle .seg-torso b {{ color:#08739e; }} .seg-panel.fat .seg-torso b {{ color:#b96619; }}
+.seg-torso small {{ display:block; font-size:3.7pt; color:#8a99a2; margin-top:.4mm; }}
+.seg-panel-foot {{ height:5.8mm; border-top:1px solid #dce6eb; padding:1.25mm 1.5mm 0; text-align:center; font-size:4.2pt; color:#6f838e; white-space:nowrap; }}
+.bottom-grid {{ display:grid; grid-template-columns:1.42fr .91fr .91fr; gap:2.2mm; }}
+.bottom-card {{ height:110mm; }}
+.history-inner {{ padding:1.3mm 1.5mm 1mm; }}
+.ih-wrap {{ width:100%; }}
+.ih-row {{ display:grid; grid-template-columns:24mm 1fr; min-height:23.4mm; border-bottom:1px solid #d9e1e6; background:#fff; }}
+.ih-label {{ background:#e2eaee; padding:2.2mm 1.5mm 1.3mm; color:#394f5a; }}
+.ih-label b {{ display:block; font-size:7pt; line-height:1; }}
+.ih-label span {{ display:block; font-size:4.2pt; margin-top:.5mm; color:#6f818b; }}
+.ih-label small {{ display:block; font-size:3.8pt; margin-top:1.3mm; line-height:1.22; color:#6f818b; }}
+.ih-plot {{ padding:.6mm .5mm .2mm 1mm; overflow:hidden; }}
+.history-svg {{ display:block; width:100%; height:21.5mm; }}
+.history-svg .hgrid {{ stroke:#eef2f4; stroke-width:1; }} .history-svg .hbase {{ stroke:#d8e0e4; stroke-width:1; }}
+.history-svg .hval {{ fill:#2b3e48; font-size:17px; font-weight:700; font-family:Arial,Helvetica,sans-serif; }}
+.ih-dates {{ display:grid; grid-template-columns:24mm 1fr; min-height:8.8mm; }}
+.ih-date-grid {{ display:grid; align-items:start; text-align:center; color:#697d88; padding:.8mm .3mm 0 1mm; }}
+.ih-date-grid span {{ display:block; justify-self:center; white-space:nowrap; line-height:1.05; font-size:3.7pt; }}
+.ih-date-grid b {{ display:block; font-size:4.2pt; color:#546a76; }}
+.ih-date-grid small {{ display:block; margin-top:.25mm; font-size:3.6pt; color:#7f9099; }}
+.ih-note {{ margin-top:1.1mm; padding:1.2mm 1.4mm; background:#eef4f7; font-size:4.2pt; color:#687d89; line-height:1.32; }}
 .params {{ padding:1.4mm 2.4mm; font-size:5.5pt; }}
 .param-row,.math-row {{ display:flex; justify-content:space-between; line-height:1.55; }}
 .param-row b,.math-row b {{ color:#00578c; }}
@@ -916,24 +914,16 @@ table.hist td {{ padding:.35mm 0; }} table.hist td:not(:first-child), table.hist
       </div></div>
     </div>
 
-    <div class='card segment-card'><div class='section-title split'><span>SEGMENTAL MUSCLE & FAT ANALYSIS</span><small>Latest segmental scan: {seg_date}</small></div><div class='segment-wrap'>
-      <div class='segment-maps'>
-        {_segment_map(data, 'muscle')}
-        {_segment_map(data, 'fat')}
+    <div class='card segment-card'><div class='section-title split'><span>SEGMENTAL ANALYSIS</span><small>Latest segmental scan: {seg_date}</small></div><div class='segment-wrap'>
+      <div class='segment-panels'>
+        {_segment_analysis_panel(data, 'muscle')}
+        {_segment_analysis_panel(data, 'fat')}
       </div>
-      <div class='balance-grid'>
-        {_balance_card('ARM MUSCLE BALANCE', la.muscle_kg, ra.muscle_kg)}
-        {_balance_card('LEG MUSCLE BALANCE', ll.muscle_kg, rl.muscle_kg)}
-      </div>
-      <div class='segment-note'>Colour intensity shows relative regional mass within this segmental scan only; it does not indicate a healthy/unhealthy reference range.</div>
     </div></div>
 
     <div class='bottom-grid'>
       <div class='card bottom-card'><div class='section-title'>BODY COMPOSITION HISTORY</div><div class='history-inner'>
-        <table class='hist'><thead><tr><th>Date</th><th>Wt (kg)</th><th>Fat%</th><th>Muscle</th></tr></thead><tbody>{''.join(hist_rows)}</tbody></table>
-        {_history_chart(data.monthly,'Weight (kg)','12-mo monthly median weight',' kg',1)}
-        {_history_chart(data.monthly,'Body fat %','12-mo monthly median body fat','%',1)}
-        {_history_chart(data.monthly,'Muscle mass (kg)','12-mo monthly median muscle',' kg',1)}
+        {_history_panel(data)}
       </div></div>
 
       <div class='card bottom-card'><div class='section-title'>BODY SCAN PARAMETERS</div><div class='params'>
