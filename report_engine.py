@@ -522,46 +522,111 @@ def _mix(c1: str, c2: str, t: float) -> str:
     return "#%02x%02x%02x" % tuple(vals)
 
 
-def _segment_colors(segments: Dict[str, SegmentValue]) -> Dict[str, str]:
-    ratios = {}
-    for pos, seg in segments.items():
-        if seg.muscle_kg is not None and seg.fat_kg is not None and (seg.muscle_kg + seg.fat_kg) > 0:
-            ratios[pos] = seg.fat_kg / (seg.muscle_kg + seg.fat_kg)
-    if not ratios:
-        return {p: "#5bb8a8" for p in segments}
-    lo, hi = min(ratios.values()), max(ratios.values())
+def _segment_metric_value(seg: SegmentValue, metric: str) -> Optional[float]:
+    return seg.muscle_kg if metric == "muscle" else seg.fat_kg
+
+
+def _segment_metric_colors(segments: Dict[str, SegmentValue], metric: str) -> Dict[str, str]:
+    base = "#1688a6" if metric == "muscle" else "#d79a45"
+    values = {
+        pos: _segment_metric_value(seg, metric)
+        for pos, seg in segments.items()
+        if _segment_metric_value(seg, metric) is not None
+    }
+    finite = [float(v) for v in values.values() if v is not None and float(v) >= 0]
+    if not finite:
+        return {p: "#dfe7eb" for p in segments}
+    vmax = max(finite) or 1.0
     out = {}
     for pos in segments:
-        if pos not in ratios or hi == lo:
-            t = 0.35
+        v = values.get(pos)
+        if v is None:
+            out[pos] = "#e6ecef"
         else:
-            t = (ratios[pos] - lo) / (hi - lo)
-        # Teal = lower relative fat contribution; amber = higher relative fat contribution.
-        out[pos] = _mix("#2caa93", "#b6b56d", 0.18 + t * 0.52)
+            # Intensity represents only regional share within this scan. It is not a reference range.
+            t = max(0.0, min(1.0, float(v) / vmax))
+            out[pos] = _mix("#edf2f4", base, 0.26 + 0.70 * (t ** 0.72))
     return out
 
 
-def _segment_svg(data: ReportData) -> str:
-    c = _segment_colors(data.segments)
-    la, ra, torso, ll, rl = [c.get(x, "#65b9aa") for x in ["Left Arm", "Right Arm", "Torso", "Left Leg", "Right Leg"]]
+def _segment_body_svg(data: ReportData, metric: str) -> str:
+    c = _segment_metric_colors(data.segments, metric)
+    la, ra, torso, ll, rl = [c.get(x, "#dfe7eb") for x in ["Left Arm", "Right Arm", "Torso", "Left Leg", "Right Leg"]]
+    female = str(data.profile.sex).lower().startswith("f")
+    if female:
+        torso_path = "M84 58 C90 50 99 47 110 47 C121 47 130 50 136 58 C139 72 138 88 133 104 C130 114 132 126 141 142 C132 150 121 154 110 154 C99 154 88 150 79 142 C88 126 90 114 87 104 C82 88 81 72 84 58 Z"
+        pelvis_path = "M80 141 C89 149 99 153 110 153 C121 153 131 149 140 141 L136 165 C127 171 120 174 110 174 C100 174 93 171 84 165 Z"
+    else:
+        torso_path = "M80 58 C88 49 98 46 110 46 C122 46 132 49 140 58 C144 75 143 94 138 111 C134 127 124 141 110 148 C96 141 86 127 82 111 C77 94 76 75 80 58 Z"
+        pelvis_path = "M83 142 C92 148 101 151 110 151 C119 151 128 148 137 142 L135 166 C126 171 118 174 110 174 C102 174 94 171 85 166 Z"
+    # Smooth, neutral medical-style silhouette with independently shaded regions.
     return f"""
-    <svg viewBox='0 0 220 320' class='body-svg' role='img' aria-label='Segmental body composition schematic'>
+    <svg viewBox='0 0 220 320' class='segment-body-svg' role='img' aria-label='{metric.title()} regional distribution body schematic'>
       <defs>
-        <filter id='soft'><feGaussianBlur stdDeviation='1.25'/></filter>
-        <linearGradient id='skinbase' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='#e5eaed'/><stop offset='1' stop-color='#cbd4d9'/></linearGradient>
+        <linearGradient id='head-{metric}' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='#edf1f3'/><stop offset='1' stop-color='#cfd8dd'/></linearGradient>
+        <filter id='shadow-{metric}' x='-20%' y='-20%' width='140%' height='140%'><feDropShadow dx='0' dy='1.4' stdDeviation='2.0' flood-color='#6e8795' flood-opacity='.16'/></filter>
       </defs>
-      <circle cx='110' cy='30' r='18' fill='url(#skinbase)' opacity='.95'/>
-      <rect x='102' y='44' width='16' height='16' rx='7' fill='#d8e0e4' opacity='.9'/>
-      <path d='M82 58 Q110 48 138 58 L148 105 Q145 135 132 158 Q110 169 88 158 Q75 135 72 105 Z' fill='{torso}' opacity='.62' filter='url(#soft)'/>
-      <path d='M82 65 Q64 69 54 91 L34 148 Q30 160 40 164 Q48 164 51 153 L72 111 L84 91 Z' fill='{la}' opacity='.67' filter='url(#soft)'/>
-      <path d='M138 65 Q156 69 166 91 L186 148 Q190 160 180 164 Q172 164 169 153 L148 111 L136 91 Z' fill='{ra}' opacity='.67' filter='url(#soft)'/>
-      <path d='M88 151 Q110 164 132 151 L134 178 Q110 190 86 178 Z' fill='#dce3e6' opacity='.82'/>
-      <path d='M88 174 Q80 208 82 250 L78 295 Q77 307 91 307 L102 303 L104 249 L109 184 Z' fill='{ll}' opacity='.70' filter='url(#soft)'/>
-      <path d='M132 174 Q140 208 138 250 L142 295 Q143 307 129 307 L118 303 L116 249 L111 184 Z' fill='{rl}' opacity='.70' filter='url(#soft)'/>
-      <ellipse cx='110' cy='174' rx='23' ry='11' fill='#e7ebed' opacity='.55'/>
-      <path d='M78 294 Q72 305 64 310 L91 310 L92 303Z' fill='#d9e0e3' opacity='.9'/>
-      <path d='M142 294 Q148 305 156 310 L129 310 L128 303Z' fill='#d9e0e3' opacity='.9'/>
+      <g filter='url(#shadow-{metric})' stroke='#cbd6dc' stroke-width='1.15' stroke-linejoin='round'>
+        <ellipse cx='110' cy='27' rx='17' ry='20' fill='url(#head-{metric})'/>
+        <path d='M102 45 C104 51 104 54 102 59 L118 59 C116 54 116 51 118 45 Z' fill='#dde5e9'/>
+        <path d='{torso_path}' fill='{torso}'/>
+        <path d='M82 63 C68 67 60 77 55 91 L34 151 C30 162 34 169 41 168 C47 168 50 163 53 155 L73 111 C78 101 84 93 88 86 Z' fill='{la}'/>
+        <path d='M138 63 C152 67 160 77 165 91 L186 151 C190 162 186 169 179 168 C173 168 170 163 167 155 L147 111 C142 101 136 93 132 86 Z' fill='{ra}'/>
+        <path d='{pelvis_path}' fill='#dfe6e9'/>
+        <path d='M87 165 C80 190 79 216 82 248 L78 294 C77 305 82 311 90 310 L100 306 L103 248 L108 174 Z' fill='{ll}'/>
+        <path d='M133 165 C140 190 141 216 138 248 L142 294 C143 305 138 311 130 310 L120 306 L117 248 L112 174 Z' fill='{rl}'/>
+        <path d='M78 293 C74 302 68 307 61 311 L91 311 L91 304 Z' fill='#dce4e8'/>
+        <path d='M142 293 C146 302 152 307 159 311 L129 311 L129 304 Z' fill='#dce4e8'/>
+      </g>
     </svg>"""
+
+
+def _segment_label(position: str, value: Optional[float], align: str = "left") -> str:
+    return f"""<div class='map-label {align}'><span>{escape(position.upper())}</span><b>{fmt_num(value,1,' kg')}</b></div>"""
+
+
+def _segment_map(data: ReportData, metric: str) -> str:
+    seg = data.segments
+    la, ra = seg.get("Left Arm", SegmentValue()), seg.get("Right Arm", SegmentValue())
+    ll, rl = seg.get("Left Leg", SegmentValue()), seg.get("Right Leg", SegmentValue())
+    torso = seg.get("Torso", SegmentValue())
+    getv = lambda x: _segment_metric_value(x, metric)
+    title = "MUSCLE DISTRIBUTION" if metric == "muscle" else "FAT DISTRIBUTION"
+    accent = "muscle" if metric == "muscle" else "fat"
+    return f"""
+      <div class='map-panel {accent}'>
+        <div class='map-head'><b>{title}</b><span>regional mass</span></div>
+        <div class='map-content'>
+          <div class='map-side left-side'>
+            {_segment_label('Left Arm', getv(la), 'right')}
+            {_segment_label('Left Leg', getv(ll), 'right')}
+          </div>
+          <div class='map-center'>
+            <div class='torso-chip'><span>TORSO</span><b>{fmt_num(getv(torso),1,' kg')}</b></div>
+            {_segment_body_svg(data, metric)}
+          </div>
+          <div class='map-side right-side'>
+            {_segment_label('Right Arm', getv(ra), 'left')}
+            {_segment_label('Right Leg', getv(rl), 'left')}
+          </div>
+        </div>
+      </div>"""
+
+
+def _balance_card(title: str, left: Optional[float], right: Optional[float]) -> str:
+    diff = _balance(left, right)
+    if left is None or right is None:
+        return f"<div class='balance-card'><div class='balance-title'>{escape(title)}</div><div class='balance-missing'>No paired muscle values</div></div>"
+    mx = max(left, right, 0.0001)
+    lw = left / mx * 100
+    rw = right / mx * 100
+    return f"""
+      <div class='balance-card'>
+        <div class='balance-head'><b>{escape(title)}</b><span>{fmt_num(diff,1,'%')} difference</span></div>
+        <div class='balance-values'><span>L&nbsp; <b>{left:.1f} kg</b></span><span>R&nbsp; <b>{right:.1f} kg</b></span></div>
+        <div class='balance-track'><div class='balance-half left'><i style='width:{lw:.1f}%'></i></div><em></em><div class='balance-half right'><i style='width:{rw:.1f}%'></i></div></div>
+      </div>"""
+
 
 def _sparkline_svg(values: List[Optional[float]], width=250, height=58) -> str:
     arr = np.array([np.nan if v is None else float(v) for v in values], dtype=float)
@@ -752,26 +817,52 @@ html,body {{ margin:0; padding:0; background:#eef3f6; font-family: Arial, Helvet
 .ref-zone {{ position:absolute; top:0; bottom:0; background:#c8ead2; border-radius:2mm; }}
 .marker {{ position:absolute; top:50%; width:3.1mm; height:3.1mm; margin-left:-1.55mm; margin-top:-1.55mm; border-radius:50%; background:#075782; box-shadow:0 0 0 .45mm #fff; }}
 .segment-card {{ margin-bottom:2.6mm; }}
-.segment-wrap {{ height:74mm; position:relative; padding:2mm 3mm; }}
-.body-svg {{ width:43mm; height:58mm; position:absolute; left:50%; top:8mm; transform:translateX(-50%); }}
-.seg-card {{ width:32mm; border-radius:2.2mm; background:#fff; box-shadow:0 .5mm 2.3mm rgba(25,60,80,.12); padding:2mm 2.3mm; font-size:6.4pt; line-height:1.45; color:#174c70; }}
-.seg-title {{ color:#526c7e; font-size:5.7pt; font-weight:800; margin-bottom:.7mm; }}
-.seg-card span {{ min-width:10mm; display:inline-block; }}
-.seg-card b {{ color:#00578c; }}
-.seg-la {{ position:absolute; left:36mm; top:25mm; }} .seg-ra {{ position:absolute; right:36mm; top:25mm; }}
-.seg-ll {{ position:absolute; left:36mm; top:50mm; }} .seg-rl {{ position:absolute; right:36mm; top:50mm; }}
-.seg-torso {{ position:absolute; left:50%; top:3mm; transform:translateX(-50%); width:36mm; text-align:center; box-shadow:none; padding:0; }}
-.seg-balance {{ position:absolute; left:3mm; right:3mm; bottom:2mm; display:flex; justify-content:space-between; font-size:5.5pt; color:#677985; }}
+.section-title.split {{ display:flex; justify-content:space-between; align-items:center; }}
+.section-title.split small {{ font-size:5pt; font-weight:600; opacity:.86; letter-spacing:0; }}
+.segment-wrap {{ height:57mm; padding:2mm 2.4mm 1.2mm; }}
+.segment-maps {{ display:grid; grid-template-columns:1fr 1fr; gap:2.4mm; height:39.5mm; }}
+.map-panel {{ border:1px solid #e0e9ee; border-radius:1.8mm; background:linear-gradient(180deg,#fbfdfe 0%,#f7fafb 100%); overflow:hidden; }}
+.map-panel.muscle {{ box-shadow:inset 0 .65mm 0 #1688a6; }}
+.map-panel.fat {{ box-shadow:inset 0 .65mm 0 #d79a45; }}
+.map-head {{ height:5.1mm; padding:1.1mm 2mm .7mm; display:flex; justify-content:space-between; align-items:center; color:#315e78; }}
+.map-head b {{ font-size:5.8pt; letter-spacing:.15px; }}
+.map-head span {{ font-size:4.4pt; color:#8998a1; }}
+.map-panel.muscle .map-head b {{ color:#0b718e; }} .map-panel.fat .map-head b {{ color:#a96d1e; }}
+.map-content {{ display:grid; grid-template-columns:1fr 26mm 1fr; align-items:center; height:33.3mm; padding:0 1.4mm 1mm; }}
+.map-side {{ height:25mm; display:flex; flex-direction:column; justify-content:space-between; }}
+.map-label {{ font-size:4.8pt; line-height:1.15; color:#607988; }}
+.map-label span {{ display:block; font-size:4.3pt; font-weight:800; color:#738691; margin-bottom:.55mm; }}
+.map-label b {{ display:block; color:#00578c; font-size:6.1pt; }}
+.map-label.right {{ text-align:right; padding-right:1.4mm; }} .map-label.left {{ text-align:left; padding-left:1.4mm; }}
+.map-center {{ position:relative; height:32mm; display:flex; justify-content:center; align-items:flex-end; }}
+.segment-body-svg {{ width:20mm; height:29.5mm; display:block; }}
+.torso-chip {{ position:absolute; top:-.4mm; left:50%; transform:translateX(-50%); z-index:2; min-width:20mm; text-align:center; background:rgba(255,255,255,.90); border:1px solid #e2eaee; border-radius:1.3mm; padding:.55mm 1mm .5mm; line-height:1.05; }}
+.torso-chip span {{ display:block; color:#718590; font-size:4pt; font-weight:800; }}
+.torso-chip b {{ display:block; color:#00578c; font-size:5.8pt; margin-top:.35mm; }}
+.balance-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:2.4mm; margin-top:1.6mm; }}
+.balance-card {{ height:10.2mm; border:1px solid #e1e9ed; border-radius:1.5mm; padding:1.1mm 1.8mm 1mm; background:#fbfcfd; }}
+.balance-head {{ display:flex; justify-content:space-between; align-items:center; font-size:4.6pt; color:#667d8b; line-height:1; }}
+.balance-head b {{ color:#315e78; font-size:5pt; }}
+.balance-head span {{ color:#00578c; font-weight:800; }}
+.balance-values {{ display:flex; justify-content:space-between; margin-top:.9mm; font-size:4.7pt; color:#6e808b; }}
+.balance-values b {{ color:#00578c; }}
+.balance-track {{ display:grid; grid-template-columns:1fr .45mm 1fr; gap:.8mm; align-items:center; height:2.1mm; margin-top:.45mm; }}
+.balance-track em {{ width:.45mm; height:3.2mm; background:#b7c6ce; border-radius:.4mm; }}
+.balance-half {{ height:1.7mm; background:#edf2f5; border-radius:1mm; display:flex; align-items:center; overflow:hidden; }}
+.balance-half.left {{ justify-content:flex-end; }} .balance-half.right {{ justify-content:flex-start; }}
+.balance-half i {{ display:block; height:100%; background:#1785a5; border-radius:1mm; }}
+.balance-missing {{ margin-top:2mm; font-size:4.7pt; color:#87969e; }}
+.segment-note {{ text-align:center; margin-top:.75mm; font-size:4.15pt; color:#7d8d96; }}
 .bottom-grid {{ display:grid; grid-template-columns:1.16fr 1.02fr .95fr; gap:2.2mm; }}
-.bottom-card {{ height:107mm; }}
+.bottom-card {{ height:119mm; }}
 .history-inner {{ padding:1.3mm 2.3mm; }}
 table.hist {{ width:100%; border-collapse:collapse; font-size:5.5pt; color:#315b77; margin-bottom:1mm; }}
 table.hist th {{ text-align:left; font-size:5.2pt; color:#667d8d; font-weight:700; padding:.5mm 0; }}
 table.hist td {{ padding:.35mm 0; }} table.hist td:not(:first-child), table.hist th:not(:first-child) {{ text-align:right; }}
-.trend-block {{ margin-top:.4mm; }}
+.trend-block {{ margin-top:.8mm; }}
 .trend-title {{ display:flex; justify-content:space-between; font-size:5.4pt; font-weight:700; color:#446b84; line-height:1; }}
 .trend-title strong {{ color:#00578c; }}
-.spark {{ display:block; width:100%; height:11mm; }}
+.spark {{ display:block; width:100%; height:14mm; }}
 .trend-axis {{ display:flex; justify-content:space-between; margin-top:-1.3mm; font-size:4.2pt; color:#8a98a1; }}
 .params {{ padding:1.4mm 2.4mm; font-size:5.5pt; }}
 .param-row,.math-row {{ display:flex; justify-content:space-between; line-height:1.55; }}
@@ -825,14 +916,16 @@ table.hist td {{ padding:.35mm 0; }} table.hist td:not(:first-child), table.hist
       </div></div>
     </div>
 
-    <div class='card segment-card'><div class='section-title'>SEGMENTAL MUSCLE & FAT ANALYSIS</div><div class='segment-wrap'>
-      <div class='seg-torso'>{_segment_card('Torso',torso)}</div>
-      <div class='seg-la'>{_segment_card('Left Arm',la)}</div>
-      <div class='seg-ra'>{_segment_card('Right Arm',ra)}</div>
-      <div class='seg-ll'>{_segment_card('Left Leg',ll)}</div>
-      <div class='seg-rl'>{_segment_card('Right Leg',rl)}</div>
-      {_segment_svg(data)}
-      <div class='seg-balance'><span>Arm muscle L/R difference: {fmt_num(arm_diff,1,'%')}</span><span>Relative segment shading: teal = lower fat contribution, amber = higher</span><span>Leg muscle L/R difference: {fmt_num(leg_diff,1,'%')}</span></div>
+    <div class='card segment-card'><div class='section-title split'><span>SEGMENTAL MUSCLE & FAT ANALYSIS</span><small>Latest segmental scan: {seg_date}</small></div><div class='segment-wrap'>
+      <div class='segment-maps'>
+        {_segment_map(data, 'muscle')}
+        {_segment_map(data, 'fat')}
+      </div>
+      <div class='balance-grid'>
+        {_balance_card('ARM MUSCLE BALANCE', la.muscle_kg, ra.muscle_kg)}
+        {_balance_card('LEG MUSCLE BALANCE', ll.muscle_kg, rl.muscle_kg)}
+      </div>
+      <div class='segment-note'>Colour intensity shows relative regional mass within this segmental scan only; it does not indicate a healthy/unhealthy reference range.</div>
     </div></div>
 
     <div class='bottom-grid'>
