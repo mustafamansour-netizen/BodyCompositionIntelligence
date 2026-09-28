@@ -46,55 +46,14 @@ if other_file:
         .reset_index()
     )
 
-    left, center, right = st.columns([2,3,2])
-
-    with left:
-
-        st.subheader("Left Arm")
-
-        st.dataframe(
-            pivot_table[
-                pivot_table["position"]=="Left Arm"
-            ]
-        )
-
-        st.subheader("Left Leg")
-
-        st.dataframe(
-            pivot_table[
-                pivot_table["position"]=="Left leg"
-            ]
-        )
-
-    with center:
-
-        st.image(
-            "https://upload.wikimedia.org/wikipedia/commons/thumb/5/55/Human_body_silhouette.svg/512px-Human_body_silhouette.svg.png",
-            width=300
-        )
-
-    with right:
-
-        st.subheader("Right Arm")
-
-        st.dataframe(
-            pivot_table[
-                pivot_table["position"]=="Right Arm"
-            ]
-        )
-
-        st.subheader("Right Leg")
-
-        st.dataframe(
-            pivot_table[
-                pivot_table["position"]=="Right leg"
-            ]
-        )
-
-    st.subheader("Torso")
-
-    st.dataframe(
-        pivot_table[
-            pivot_table["position"]=="Torso"
-        ]
+    st.success(
+        f"Latest Segment Scan: {latest_date}"
     )
+
+    def get_segment(position):
+
+        result = pivot_table[
+            pivot_table["position"] == position
+        ]
+
+        if result.empty
