@@ -89,13 +89,22 @@ if weight_file and other_file:
 
     st.subheader("Detected Segment Positions")
 
-    segment_positions = sorted(
-        other_df["position"]
-        .dropna()
-        .unique()
-    )
+segment_counts = (
+    other_df["position"]
+    .dropna()
+    .value_counts()
+    .reset_index()
+)
 
-    st.write(segment_positions)
+segment_counts.columns = [
+    "Position",
+    "Record Count"
+]
+
+st.dataframe(
+    segment_counts,
+    use_container_width=True
+)
 
     st.divider()
 
