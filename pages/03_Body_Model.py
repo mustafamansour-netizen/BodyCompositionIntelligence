@@ -1,122 +1,58 @@
 import streamlit as st
-import pandas as pd
 
-st.set_page_config(
-    page_title="Body Model",
-    layout="wide"
-)
-
-st.title("Segment Body Analysis")
+st.title("Body Model")
 
 if "other_df" not in st.session_state:
+
     st.warning(
-        "Open the Import page and upload both CSV files first."
+        "Load data from Import page first."
     )
+
     st.stop()
 
-other_df = st.session_state["other_df"].copy()
+left_col, center_col, right_col = st.columns(
+    [2, 3, 2]
+)
 
-required_columns = [
-    "type",
-    "date",
-    "value",
-    "position"
-]
+with left_col:
 
-missing_columns = [
-    column
-    for column in required_columns
-    if column not in other_df.columns
-]
+    st.subheader("Left Arm")
 
-if missing_columns:
-    st.error(
-        "Missing columns in other.csv: "
-        + ", ".join(missing_columns)
+    st.metric(
+        "Muscle",
+        "4.6 kg"
     )
-    st.stop()
 
-other_df["date"] = pd.to_datetime(
-    other_df["date"],
-    errors="coerce"
-)
+    st.subheader("Left Leg")
 
-other_df["value_numeric"] = pd.to_numeric(
-    other_df["value"],
-    errors="coerce"
-)
-
-segment_types = [
-    "Muscle Mass for segments",
-    "Fat Mass for segments in mass unit",
-    "Fat Free Mass for segments"
-]
-
-segment_df = other_df[
-    other_df["type"].isin(segment_types)
-].copy()
-
-segment_df = segment_df.dropna(
-    subset=[
-        "date",
-        "position",
-        "value_numeric"
-    ]
-)
-
-if segment_df.empty:
-    st.error(
-        "No valid segment measurements were found."
+    st.metric(
+        "Muscle",
+        "12.6 kg"
     )
-    st.stop()
 
-latest_date = segment_df["date"].max()
+with center_col:
 
-latest_scan = segment_df[
-    segment_df["date"] == latest_date
-].copy()
-
-pivot_table = (
-    latest_scan
-    .pivot_table(
-        index="position",
-        columns="type",
-        values="value_numeric",
-        aggfunc="first"
+    st.markdown(
+        """
+        <div style='text-align:center;font-size:180px'>
+        🧍
+        </div>
+        """,
+        unsafe_allow_html=True
     )
-    .reset_index()
-)
 
-def get_value(position, metric):
+with right_col:
 
-    matching_rows = pivot_table[
-        pivot_table["position"] == position
-    ]
+    st.subheader("Right Arm")
 
-    if matching_rows.empty:
-        return None
+    st.metric(
+        "Muscle",
+        "4.8 kg"
+    )
 
-    if metric not in matching_rows.columns:
-        return None
+    st.subheader("Right Leg")
 
-    value = matching_rows.iloc[0][metric]
-
-    if pd.isna(value):
-        return None
-
-    return float(value)
-
-def format_value(value):
-
-    if value is None:
-        return "No data"
-
-    return f"{value:.1f} kg"
-
-def calculate_difference(left_value, right_value):
-
-    if left_value is None or right_value is None:
-        return None
-
-    average_value = (
-        left_value + right_value
+    st.metric(
+        "Muscle",
+        "12.5 kg"
+    )
