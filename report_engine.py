@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 
-ENGINE_BUILD = "V7"
+ENGINE_BUILD = "V8.0"
 
 # -----------------------------
 # Data model
@@ -34,6 +34,7 @@ class Profile:
     journey_start_date: Optional[date] = None
     starting_weight_kg: Optional[float] = None
     target_body_fat_pct: Optional[float] = None
+    display_units: str = "Metric"  # Metric / US Customary
 
 
 @dataclass
@@ -70,6 +71,8 @@ class ReportData:
     vascular_age: Optional[float]
     icw_kg: Optional[float]
     ecw_kg: Optional[float]
+    pwv_mps: Optional[float]
+    scan_heart_rate_bpm: Optional[float]
     segments: Dict[str, SegmentValue]
     history: pd.DataFrame
     monthly: pd.DataFrame
@@ -113,16 +116,51 @@ class ReportData:
 # Withings import
 # -----------------------------
 
-WEIGHT_REQUIRED = {
-    "Date",
-    "Weight (kg)",
-    "Fat mass (kg)",
-    "Bone mass (kg)",
-    "Muscle mass (kg)",
-    "Hydration (kg)",
+CANONICAL_WEIGHT_COLUMNS = [
+    "Weight (kg)", "Fat mass (kg)", "Bone mass (kg)", "Muscle mass (kg)", "Hydration (kg)"
+]
+OTHER_REQUIRED = {"type", "date", "value", "unit", "position"}
+
+_MASS_TO_KG = {
+    "kg": 1.0, "kgs": 1.0, "kilogram": 1.0, "kilograms": 1.0,
+    "lb": 0.45359237, "lbs": 0.45359237, "pound": 0.45359237, "pounds": 0.45359237,
 }
 
-OTHER_REQUIRED = {"type", "date", "value", "unit", "position"}
+
+def _clean_unit(value: object) -> str:
+    u = str(value or "").strip().lower().replace(".", "")
+    return re.sub(r"\s+", " ", u)
+
+
+def _mass_factor_to_kg(unit: object) -> Optional[float]:
+    return _MASS_TO_KG.get(_clean_unit(unit))
+
+
+def _column_unit(col: object) -> Optional[str]:
+    s = str(col)
+    m = re.search(r"\(([^)]+)\)\s*$", s)
+    return _clean_unit(m.group(1)) if m else None
+
+
+def _match_weight_column(columns: Iterable[object], concept: str) -> Tuple[Optional[str], Optional[str]]:
+    patterns = {
+        "weight": ["weight"],
+        "fat": ["fat mass", "fatmass"],
+        "bone": ["bone mass", "bonemass"],
+        "muscle": ["muscle mass", "musclemass"],
+        "water": ["hydration", "body water", "water mass"],
+    }
+    candidates = []
+    for col in columns:
+        n = _norm(col)
+        if any(p in n for p in patterns[concept]):
+            unit = _column_unit(col)
+            if unit in _MASS_TO_KG:
+                candidates.append((str(col), unit))
+    if not candidates:
+        return None, None
+    # Prefer exact/common labels and kg/lb explicit headers.
+    return candidates[0]
 
 
 def _read_csv_bytes(raw: bytes) -> pd.DataFrame:
@@ -130,7 +168,6 @@ def _read_csv_bytes(raw: bytes) -> pd.DataFrame:
     for encoding in ("utf-8-sig", "utf-8", "utf-16", "cp1252", "latin1"):
         try:
             text = raw.decode(encoding)
-            # Withings exports are comma-separated, but sniff semicolon if needed.
             first = text.splitlines()[0] if text.splitlines() else ""
             sep = ";" if first.count(";") > first.count(",") else ","
             return pd.read_csv(io.StringIO(text), sep=sep)
@@ -149,11 +186,37 @@ def _find_member(zf: zipfile.ZipFile, basename: str) -> Optional[str]:
             candidates.append(name)
     if not candidates:
         return None
-    # Prefer the shortest path (normally the canonical export file).
     return sorted(candidates, key=lambda x: (x.count("/"), len(x)))[0]
 
 
-def load_withings_zip(raw_zip: bytes) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, object]]:
+def _optional_csv(zf: zipfile.ZipFile, basename: str) -> Tuple[Optional[str], Optional[pd.DataFrame]]:
+    name = _find_member(zf, basename)
+    if name is None:
+        return None, None
+    try:
+        return name, _read_csv_bytes(zf.read(name))
+    except Exception:
+        return name, None
+
+
+def _append_optional_measurements(other_df: pd.DataFrame, pwv_df: Optional[pd.DataFrame], bp_df: Optional[pd.DataFrame]) -> pd.DataFrame:
+    frames = [other_df.copy()]
+    if pwv_df is not None and {"date", "value"}.issubset(pwv_df.columns):
+        x = pwv_df[["date", "value"]].copy()
+        x["type"] = "Pulse Wave Velocity"
+        x["unit"] = "m/s"
+        x["position"] = ""
+        frames.append(x[["type", "date", "value", "unit", "position"]])
+    if bp_df is not None and {"Date", "Heart rate"}.issubset(bp_df.columns):
+        x = bp_df[["Date", "Heart rate"]].copy().rename(columns={"Date":"date", "Heart rate":"value"})
+        x["type"] = "Scan heart rate"
+        x["unit"] = "bpm"
+        x["position"] = ""
+        frames.append(x[["type", "date", "value", "unit", "position"]])
+    return pd.concat(frames, ignore_index=True, sort=False)
+
+
+def load_withings_zip(raw_zip: bytes, source_mass_unit_override: Optional[str] = None) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, object]]:
     with zipfile.ZipFile(io.BytesIO(raw_zip), "r") as zf:
         weight_name = _find_member(zf, "weight.csv")
         other_name = _find_member(zf, "other.csv")
@@ -165,38 +228,105 @@ def load_withings_zip(raw_zip: bytes) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[
             )
         weight_df = _read_csv_bytes(zf.read(weight_name))
         other_df = _read_csv_bytes(zf.read(other_name))
-        meta = {"weight_member": weight_name, "other_member": other_name}
-    return normalize_frames(weight_df, other_df, meta)
+        pwv_name, pwv_df = _optional_csv(zf, "pwv.csv")
+        bp_name, bp_df = _optional_csv(zf, "bp.csv")
+        other_df = _append_optional_measurements(other_df, pwv_df, bp_df)
+        meta = {
+            "weight_member": weight_name, "other_member": other_name,
+            "pwv_member": pwv_name, "bp_member": bp_name,
+            "pwv_records": 0 if pwv_df is None else int(len(pwv_df)),
+            "bp_records": 0 if bp_df is None else int(len(bp_df)),
+        }
+    return normalize_frames(weight_df, other_df, meta, source_mass_unit_override=source_mass_unit_override)
 
 
-def load_withings_csvs(weight_raw: bytes, other_raw: bytes) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, object]]:
+def load_withings_csvs(
+    weight_raw: bytes,
+    other_raw: bytes,
+    pwv_raw: Optional[bytes] = None,
+    bp_raw: Optional[bytes] = None,
+    source_mass_unit_override: Optional[str] = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, object]]:
     weight_df = _read_csv_bytes(weight_raw)
     other_df = _read_csv_bytes(other_raw)
-    return normalize_frames(weight_df, other_df, {"weight_member": "weight.csv", "other_member": "other.csv"})
+    pwv_df = _read_csv_bytes(pwv_raw) if pwv_raw else None
+    bp_df = _read_csv_bytes(bp_raw) if bp_raw else None
+    other_df = _append_optional_measurements(other_df, pwv_df, bp_df)
+    return normalize_frames(
+        weight_df, other_df,
+        {"weight_member":"weight.csv", "other_member":"other.csv", "pwv_member":"pwv.csv" if pwv_raw else None, "bp_member":"bp.csv" if bp_raw else None},
+        source_mass_unit_override=source_mass_unit_override,
+    )
 
 
-def normalize_frames(weight_df: pd.DataFrame, other_df: pd.DataFrame, meta=None):
+def normalize_frames(weight_df: pd.DataFrame, other_df: pd.DataFrame, meta=None, source_mass_unit_override: Optional[str] = None):
+    """Normalize a Withings export into canonical metric columns.
+
+    Import/source units and display units are deliberately independent. All body-mass
+    analytics use kg internally. Explicit kg/lb headers and other.csv row units are
+    converted here once; rendering may later show either Metric or US Customary units.
+    """
     meta = dict(meta or {})
-    missing_w = sorted(WEIGHT_REQUIRED - set(weight_df.columns))
-    missing_o = sorted(OTHER_REQUIRED - set(other_df.columns))
-    if missing_w:
-        raise ValueError("Missing weight.csv columns: " + ", ".join(missing_w))
-    if missing_o:
+    if not OTHER_REQUIRED.issubset(set(other_df.columns)):
+        missing_o = sorted(OTHER_REQUIRED - set(other_df.columns))
         raise ValueError("Missing other.csv columns: " + ", ".join(missing_o))
 
     weight_df = weight_df.copy()
     other_df = other_df.copy()
+    override = _clean_unit(source_mass_unit_override) if source_mass_unit_override else None
+    if override in {"auto", ""}:
+        override = None
+    if override and override not in _MASS_TO_KG:
+        raise ValueError("Source unit override must be kg or lb.")
+
+    source_map = {}
+    concept_to_canon = {
+        "weight":"Weight (kg)", "fat":"Fat mass (kg)", "bone":"Bone mass (kg)",
+        "muscle":"Muscle mass (kg)", "water":"Hydration (kg)",
+    }
+    canonical = pd.DataFrame()
+    # Preserve date/comments then rewrite the five mass columns canonically.
+    date_col = next((c for c in weight_df.columns if _norm(c) == "date"), None)
+    if date_col is None:
+        raise ValueError("Could not identify the Date column in weight.csv.")
+    canonical["Date"] = weight_df[date_col]
+    if "Comments" in weight_df.columns:
+        canonical["Comments"] = weight_df["Comments"]
+
+    ambiguous = []
+    for concept, canon in concept_to_canon.items():
+        col, unit = _match_weight_column(weight_df.columns, concept)
+        if col is None:
+            # Fallback for a unit-less concept column only when an override was explicitly supplied.
+            possible = [c for c in weight_df.columns if any(p in _norm(c) for p in ({
+                "weight":["weight"], "fat":["fat mass"], "bone":["bone mass"],
+                "muscle":["muscle mass"], "water":["hydration", "body water", "water mass"]
+            }[concept]))]
+            if possible and override:
+                col, unit = str(possible[0]), override
+            else:
+                ambiguous.append(canon)
+                continue
+        factor = _mass_factor_to_kg(unit or override)
+        if factor is None:
+            ambiguous.append(canon)
+            continue
+        canonical[canon] = pd.to_numeric(weight_df[col], errors="coerce") * factor
+        source_map[canon] = {"source_column": col, "source_unit": unit or override, "factor_to_kg": factor}
+
+    if ambiguous:
+        raise ValueError(
+            "Could not determine source mass units for: " + ", ".join(ambiguous) + ". "
+            "Use the Source unit override in Advanced import settings if this export omits units."
+        )
+    weight_df = canonical
 
     weight_df["Date"] = pd.to_datetime(weight_df["Date"], errors="coerce")
-    # Remove timezone to simplify grouping/display while preserving wall-clock export time.
     try:
         if getattr(weight_df["Date"].dt, "tz", None) is not None:
             weight_df["Date"] = weight_df["Date"].dt.tz_localize(None)
     except Exception:
         pass
-
-    for col in ["Weight (kg)", "Fat mass (kg)", "Bone mass (kg)", "Muscle mass (kg)", "Hydration (kg)"]:
-        weight_df[col] = pd.to_numeric(weight_df[col], errors="coerce")
 
     other_df["date"] = pd.to_datetime(other_df["date"], errors="coerce")
     try:
@@ -206,17 +336,40 @@ def normalize_frames(weight_df: pd.DataFrame, other_df: pd.DataFrame, meta=None)
         pass
     other_df["value_numeric"] = pd.to_numeric(other_df["value"], errors="coerce")
 
+    # Infer a source-mass fallback from weight.csv when all detected mass headers agree.
+    detected_units = {str(v.get("source_unit")) for v in source_map.values() if v.get("source_unit")}
+    inferred_mass_unit = next(iter(detected_units)) if len(detected_units) == 1 else None
+
+    # Normalize mass-valued other.csv rows (segmental mass, ICW/ECW) to kg.
+    def mass_like(t: object) -> bool:
+        n = _norm(t)
+        return ("segment" in n and "mass" in n) or n in {"icw", "ecw"} or "intracellular water" in n or "extracellular water" in n
+    converted = 0
+    for idx, row in other_df.iterrows():
+        if not mass_like(row.get("type")) or pd.isna(row.get("value_numeric")):
+            continue
+        u = _clean_unit(row.get("unit"))
+        factor = _mass_factor_to_kg(u)
+        if factor is None and (override or inferred_mass_unit):
+            factor = _mass_factor_to_kg(override or inferred_mass_unit)
+        if factor is not None:
+            other_df.at[idx, "value_numeric"] = float(row["value_numeric"]) * factor
+            other_df.at[idx, "unit"] = "kg"
+            converted += 1
+
     weight_df = weight_df.dropna(subset=["Date", "Weight (kg)"]).sort_values("Date").reset_index(drop=True)
     other_df = other_df.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
 
-    meta.update(
-        {
-            "weight_records": len(weight_df),
-            "other_records": len(other_df),
-            "other_types": sorted(other_df["type"].dropna().astype(str).unique().tolist()),
-            "positions": sorted(other_df["position"].dropna().astype(str).unique().tolist()),
-        }
-    )
+    meta.update({
+        "weight_records": len(weight_df),
+        "other_records": len(other_df),
+        "other_types": sorted(other_df["type"].dropna().astype(str).unique().tolist()),
+        "positions": sorted(other_df["position"].dropna().astype(str).unique().tolist()),
+        "source_mass_columns": source_map,
+        "internal_mass_unit": "kg",
+        "inferred_source_mass_unit": inferred_mass_unit,
+        "normalized_other_mass_rows": converted,
+    })
     return weight_df, other_df, meta
 
 
@@ -300,6 +453,10 @@ def _metric_kind(type_value: object) -> Optional[str]:
         return "metabolic_age"
     if "vascular" in s and "age" in s:
         return "vascular_age"
+    if "pulse wave velocity" in s or s == "pwv":
+        return "pwv"
+    if "scan heart rate" in s:
+        return "scan_heart_rate"
     if s == "icw" or "intracellular water" in s or "intra cellular water" in s:
         return "icw"
     if s == "ecw" or "extracellular water" in s or "extra cellular water" in s:
@@ -320,6 +477,21 @@ def _latest_metric(other_df: pd.DataFrame, kind: str, at_or_before: pd.Timestamp
         return None
     subset["delta"] = (subset["date"] - at_or_before).abs()
     row = subset.sort_values(["date", "delta"]).iloc[-1]
+    return float(row["value_numeric"])
+
+
+def _nearest_metric(other_df: pd.DataFrame, kind: str, target: pd.Timestamp, tolerance_minutes: int = 5) -> Optional[float]:
+    if other_df.empty:
+        return None
+    mask = other_df["type"].map(_metric_kind).eq(kind) & other_df["value_numeric"].notna()
+    subset = other_df.loc[mask].copy()
+    if subset.empty:
+        return None
+    subset["delta"] = (subset["date"] - target).abs()
+    subset = subset[subset["delta"] <= pd.Timedelta(minutes=tolerance_minutes)]
+    if subset.empty:
+        return None
+    row = subset.sort_values("delta").iloc[0]
     return float(row["value_numeric"])
 
 
@@ -500,6 +672,54 @@ def _time_consistency(complete: pd.DataFrame, n: int = 10) -> Dict[str, object]:
     return {"label":label, "class":cls, "scan_count":int(len(mins)), "median_deviation_hours":med_h, "max_deviation_hours":max_h}
 
 
+
+
+def _scan_quality(complete: pd.DataFrame, other_df: pd.DataFrame, scan_date: pd.Timestamp, consistency: Dict[str, object]) -> Dict[str, object]:
+    """Conservative data-quality context for short-term comparisons.
+
+    This does not claim medical accuracy. It combines completeness, timing consistency,
+    plausible composition ranges and unusually large short-term water shifts. BIA Error
+    codes are counted for diagnostics but are not interpreted because Withings does not
+    publish a stable public mapping for every export code.
+    """
+    issues = []
+    cls = "good"
+    latest = complete.iloc[-1]
+    w = float(latest["Weight (kg)"])
+    fm = float(latest["Fat mass (kg)"])
+    mm = float(latest["Muscle mass (kg)"])
+    water = float(latest["Hydration (kg)"])
+    if not (25 <= w <= 350):
+        issues.append("weight outside plausibility range")
+    if fm < 0 or mm < 0 or water < 0 or fm > w or mm > w or water > w:
+        issues.append("composition values outside plausibility range")
+    if len(complete) >= 2:
+        prev = complete.iloc[-2]
+        if pd.Timestamp(prev["Date"]).floor("D") >= scan_date.floor("D") - pd.Timedelta(days=3):
+            water_shift = abs(float(latest["Hydration (kg)"]) - float(prev["Hydration (kg)"]))
+            if water_shift >= 2.5:
+                issues.append(f"large short-term body-water shift ({water_shift:.1f} kg)")
+    timing_label = str((consistency or {}).get("label", ""))
+    if timing_label in {"Variable timing", "Moderate variation"}:
+        issues.append("recent measurement times vary")
+    bia = other_df[other_df["type"].map(_norm).eq("bia error") & other_df["value_numeric"].notna()].copy()
+    bia_near = bia[(bia["date"] - scan_date).abs() <= pd.Timedelta(minutes=5)] if not bia.empty else bia
+    bia_codes = [float(v) for v in bia_near["value_numeric"].tolist()]
+    if issues:
+        cls = "warn"
+        label = "Variable"
+    else:
+        label = "Good"
+    if len(complete) < 2:
+        label, cls = "Limited data", "neutral"
+    return {
+        "label": label,
+        "class": cls,
+        "issues": issues,
+        "bia_error_codes_near_scan": bia_codes,
+        "note": "Short-term BIA changes should be interpreted with consistent measurement conditions.",
+    }
+
 def build_report_data(
     weight_df: pd.DataFrame,
     other_df: pd.DataFrame,
@@ -533,6 +753,7 @@ def build_report_data(
     trend30 = _period_trend(daily, scan_date, 30)
     trend90 = _period_trend(daily, scan_date, 90)
     consistency = _time_consistency(complete, 10)
+    quality = _scan_quality(complete, other_df, scan_date, consistency)
 
     diag = dict(diagnostics or {})
     if previous is not None:
@@ -572,6 +793,7 @@ def build_report_data(
         diag["weight_rate_span_days"] = int(rate_source["span_days"])
 
     diag["measurement_consistency"] = consistency
+    diag["scan_quality"] = quality
 
     vf = other_df.copy()
     vf = vf[vf["type"].map(_metric_kind).eq("visceral_fat") & vf["value_numeric"].notna()]
@@ -602,6 +824,8 @@ def build_report_data(
         vascular_age=_latest_metric(other_df, "vascular_age", scan_date),
         icw_kg=_latest_metric(other_df, "icw", scan_date),
         ecw_kg=_latest_metric(other_df, "ecw", scan_date),
+        pwv_mps=_latest_metric(other_df, "pwv", scan_date),
+        scan_heart_rate_bpm=_nearest_metric(other_df, "scan_heart_rate", scan_date, tolerance_minutes=5),
         segments=segments,
         history=history,
         monthly=monthly,
@@ -613,6 +837,50 @@ def build_report_data(
 # Render helpers
 # -----------------------------
 
+
+
+LB_PER_KG = 2.20462262185
+
+
+def _is_us(profile: Profile) -> bool:
+    return str(getattr(profile, "display_units", "Metric")).lower().startswith("us")
+
+
+def display_mass_value(kg: Optional[float], profile: Profile) -> Optional[float]:
+    if kg is None or (isinstance(kg, float) and math.isnan(kg)):
+        return None
+    return float(kg) * LB_PER_KG if _is_us(profile) else float(kg)
+
+
+def mass_unit(profile: Profile) -> str:
+    return "lb" if _is_us(profile) else "kg"
+
+
+def fmt_mass(kg: Optional[float], profile: Profile, decimals: int = 1) -> str:
+    v = display_mass_value(kg, profile)
+    if v is None:
+        return "-"
+    return f"{v:.{decimals}f} {mass_unit(profile)}"
+
+
+def fmt_mass_delta(kg_delta: Optional[float], profile: Profile, decimals: int = 1) -> str:
+    if kg_delta is None or (isinstance(kg_delta, float) and math.isnan(kg_delta)):
+        return "-"
+    v = float(kg_delta) * (LB_PER_KG if _is_us(profile) else 1.0)
+    arrow = "↑" if v > 0 else ("↓" if v < 0 else "→")
+    return f"{arrow} {abs(v):.{decimals}f} {mass_unit(profile)}"
+
+
+def fmt_height(height_m: float, profile: Profile) -> str:
+    if not _is_us(profile):
+        return f"{height_m*100:.0f} cm"
+    total_inches = height_m / 0.0254
+    feet = int(total_inches // 12)
+    inches = total_inches - feet * 12
+    # Whole inches are easier to scan in a report; preserve one decimal only when materially non-integer.
+    if abs(inches - round(inches)) < 0.15:
+        return f"{feet} ft {round(inches):.0f} in"
+    return f"{feet} ft {inches:.1f} in"
 
 def fmt_num(v: Optional[float], decimals=1, suffix="") -> str:
     if v is None or (isinstance(v, float) and math.isnan(v)):
@@ -660,20 +928,21 @@ def _dot_class(status_class: str) -> str:
     return status_class if status_class in {"good", "warn", "bad", "neutral"} else "neutral"
 
 
-def _bar(value: float, ref: Tuple[float, float], domain: Tuple[float, float], label: str) -> str:
+def _bar(value: float, ref: Tuple[float, float], domain: Tuple[float, float], label: str, unit_suffix: str = "") -> str:
     dlo, dhi = domain
     rlo, rhi = ref
     def pct(x):
         return max(0.0, min(100.0, (x - dlo) / (dhi - dlo) * 100.0))
     rp1, rp2, vp = pct(rlo), pct(rhi), pct(value)
+    pct_suffix = "%" if "%" in label else ""
     return f"""
     <div class='bar-row'>
       <div class='bar-label'>{escape(label)}</div>
       <div class='bar-mid'>
-        <div class='bar-note'>{fmt_num(rlo,1)}-{fmt_num(rhi,1)}{('%' if '%' in label else '')}</div>
+        <div class='bar-note'>{fmt_num(rlo,1)}-{fmt_num(rhi,1)}{pct_suffix}{(' '+unit_suffix) if unit_suffix and not pct_suffix else ''}</div>
         <div class='track'><div class='ref-zone' style='left:{rp1:.1f}%;width:{max(1,rp2-rp1):.1f}%'></div><span class='marker' style='left:{vp:.1f}%'></span></div>
       </div>
-      <div class='bar-value'>{fmt_num(value,1)}{('%' if '%' in label else (' kg' if label=='Weight' else ''))}</div>
+      <div class='bar-value'>{fmt_num(value,1)}{pct_suffix}{(' '+unit_suffix) if unit_suffix and not pct_suffix else ''}</div>
     </div>"""
 
 
@@ -697,7 +966,11 @@ def _mix(c1: str, c2: str, t: float) -> str:
 
 
 def _segment_metric_value(seg: SegmentValue, metric: str) -> Optional[float]:
-    return seg.muscle_kg if metric == "muscle" else seg.fat_kg
+    if metric == "muscle":
+        return seg.muscle_kg
+    if metric == "ffm":
+        return seg.ffm_kg
+    return seg.fat_kg
 
 
 def _segment_total(segments: Dict[str, SegmentValue], metric: str) -> Optional[float]:
@@ -738,25 +1011,26 @@ def _segment_change(data: ReportData, position: str, metric: str) -> Optional[fl
     return float(cur) - float(prev)
 
 
-def _segment_delta_html(delta: Optional[float], metric: str) -> str:
+def _segment_delta_html(data: ReportData, delta: Optional[float], metric: str) -> str:
     if delta is None:
         return "<span class='seg-delta neutral-delta'>no prior</span>"
     if abs(delta) < 0.05:
-        return "<span class='seg-delta neutral-delta'>→ 0.0 kg</span>"
+        return f"<span class='seg-delta neutral-delta'>→ {fmt_mass(0.0, data.profile, 1)}</span>"
     arrow = "↑" if delta > 0 else "↓"
-    # Colour is coaching-oriented, not a clinical rating: muscle gain / fat loss are
-    # favourable directions; muscle loss / fat gain are attention directions.
     favourable = (metric == "muscle" and delta > 0) or (metric == "fat" and delta < 0)
     cls = "favourable" if favourable else "attention"
-    return f"<span class='seg-delta {cls}'>{arrow} {abs(delta):.1f} kg</span>"
+    return f"<span class='seg-delta {cls}'>{arrow} {fmt_mass(abs(delta), data.profile, 1)}</span>"
 
 
 def _segment_label(data: ReportData, position: str, value: Optional[float], metric: str, side: str = "left") -> str:
     delta = _segment_change(data, position, metric)
+    ffm = data.segments.get(position, SegmentValue()).ffm_kg
+    ffm_line = f"<small class='seg-ffm'>FFM {fmt_mass(ffm, data.profile, 1)}</small>" if metric == "muscle" and ffm is not None else ""
     return f"""<div class='seg-readout {side}'>
       <span class='seg-name'>{escape(position.upper())}</span>
-      <b>{fmt_num(value,1,' kg')}</b>
-      {_segment_delta_html(delta, metric)}
+      <b>{fmt_mass(value, data.profile, 1)}</b>
+      {ffm_line}
+      {_segment_delta_html(data, delta, metric)}
     </div>"""
 
 
@@ -805,7 +1079,7 @@ def _segment_analysis_panel(data: ReportData, metric: str) -> str:
           </div>
           <div class='seg-figure'>
             {_segment_body_svg(data, metric)}
-            <div class='seg-torso-chip'><span>TORSO</span><b>{fmt_num(getv(torso),1,' kg')}</b>{_segment_delta_html(torso_delta, metric)}</div>
+            <div class='seg-torso-chip'><span>TORSO</span><b>{fmt_mass(getv(torso),data.profile,1)}</b>{f"<small class='seg-ffm'>FFM {fmt_mass(torso.ffm_kg,data.profile,1)}</small>" if metric=='muscle' and torso.ffm_kg is not None else ''}{_segment_delta_html(data,torso_delta,metric)}</div>
           </div>
           <div class='seg-side seg-right'>
             {_segment_label(data, 'Right Arm', getv(ra), metric, 'left')}
@@ -836,7 +1110,7 @@ def _segment_trend_summary(data: ReportData) -> str:
         if pos is None or delta is None:
             return "No comparison"
         arrow = "↑" if delta > 0.05 else ("↓" if delta < -0.05 else "→")
-        return f"{pos} {arrow} {abs(delta):.1f} kg"
+        return f"{pos} {arrow} {fmt_mass(abs(delta), data.profile, 1)}"
 
     muscle = fmt_change(mp, md)
     fat = fmt_change(fp, fd)
@@ -891,14 +1165,19 @@ def _history_panel(data: ReportData) -> str:
         return "<div class='history-empty'>No complete scan history.</div>"
     h = h.tail(int(max(3, min(16, data.profile.history_points or 8))))
     dates = [pd.Timestamp(d).strftime("%d %b") for d in h["Date"]]
-    weights = [float(v) for v in h["Weight (kg)"]]
-    muscle = [float(v) for v in h["Muscle mass (kg)"]]
+    factor = LB_PER_KG if _is_us(data.profile) else 1.0
+    mu = mass_unit(data.profile)
+    weights = [float(v)*factor for v in h["Weight (kg)"]]
+    muscle = [float(v)*factor for v in h["Muscle mass (kg)"]]
     fat = [float(v) for v in h["Body fat %"]]
     day_span = max(0, (pd.Timestamp(h["Date"].iloc[-1]).floor("D") - pd.Timestamp(h["Date"].iloc[0]).floor("D")).days)
 
-    def latest_monthly(col, suffix):
+    def latest_monthly(col, suffix, convert_mass=False):
         vals = [float(v) for v in data.monthly[col].tolist() if not pd.isna(v)]
-        return f"{vals[-1]:.1f}{suffix}" if vals else "-"
+        if not vals:
+            return "-"
+        v = vals[-1] * (factor if convert_mass else 1.0)
+        return f"{v:.1f}{suffix}"
 
     def delta_text(vals, suffix):
         if len(vals) < 2:
@@ -925,8 +1204,8 @@ def _history_panel(data: ReportData) -> str:
         date_parts.append(f"<span class='{'date-muted' if not show else ''}'>{f'<b>{day}</b><small>{mon}</small>' if show else ''}</span>")
     date_cells = "".join(date_parts)
     return f"""<div class='ih-wrap'>
-        {row('Weight','kg',weights,latest_monthly('Weight (kg)',' kg'),' kg')}
-        {row('Muscle Mass','kg',muscle,latest_monthly('Muscle mass (kg)',' kg'),' kg')}
+        {row('Weight',mu,weights,latest_monthly('Weight (kg)',f' {mu}',True),f' {mu}')}
+        {row('Muscle Mass',mu,muscle,latest_monthly('Muscle mass (kg)',f' {mu}',True),f' {mu}')}
         {row('Body Fat','%',fat,latest_monthly('Body fat %','%'),' pp')}
         <div class='ih-dates'><div></div><div class='ih-date-grid' style='grid-template-columns:repeat({len(dates)},1fr)'>{date_cells}</div><div></div></div>
         <div class='ih-note'>{escape(data.profile.history_daily_rule)} per measured day · {len(dates)} days shown · latest point emphasized · monthly medians use all complete scans and remain gap-aware.</div>
@@ -953,6 +1232,9 @@ def render_report_html(data: ReportData, standalone: bool = True) -> str:
     sex = data.profile.sex.title()
     name = data.profile.name.strip() or "Profile"
     profile_id = (data.profile.profile_id or "").strip()
+    mu = mass_unit(data.profile)
+    mass_factor = LB_PER_KG if _is_us(data.profile) else 1.0
+    height_text = fmt_height(data.profile.height_m, data.profile)
 
     bf_status, bf_cls = _status(data.body_fat_pct, data.bands.body_fat)
     mm_status, mm_cls = _status(data.muscle_pct, data.bands.muscle_pct)
@@ -992,8 +1274,8 @@ def render_report_html(data: ReportData, standalone: bool = True) -> str:
     bmr_value = f"{data.bmr:,.0f} kcal/day" if data.bmr is not None else "-"
     meta_age = f"{data.metabolic_age:.0f} y" if data.metabolic_age is not None else "-"
     vasc_age = f"{data.vascular_age:.0f} y" if data.vascular_age is not None else "-"
-    icw = fmt_num(data.icw_kg, 0, " kg")
-    ecw = fmt_num(data.ecw_kg, 0, " kg")
+    icw = fmt_mass(data.icw_kg, data.profile, 0)
+    ecw = fmt_mass(data.ecw_kg, data.profile, 0)
     ecw_tbw = fmt_num(data.ecw_tbw_pct, 1, "%*")
 
     diag = data.diagnostics or {}
@@ -1041,6 +1323,7 @@ def render_report_html(data: ReportData, standalone: bool = True) -> str:
     t90_mm = diag.get("trend90_muscle_delta")
     t90_bf = diag.get("trend90_body_fat_delta")
     consistency = diag.get("measurement_consistency") or {}
+    scan_quality = diag.get("scan_quality") or {}
 
     goal = data.profile.goal_weight_kg
     target_bf = data.profile.target_body_fat_pct
@@ -1052,27 +1335,27 @@ def render_report_html(data: ReportData, standalone: bool = True) -> str:
         projected_fat = goal - data.fat_free_mass_kg
         projected_pct = projected_fat / goal * 100 if goal > 0 else None
         projection_valid = projected_fat >= 0
-        goal_summary = f"{abs(goal_gap):.2f} kg to goal"
+        goal_summary = f"{fmt_mass(abs(goal_gap), data.profile, 2)} to goal"
 
         progress_html = ""
         if start_weight is not None and not math.isclose(float(start_weight), float(goal)):
             denom = float(start_weight) - float(goal)
             raw_progress = (float(start_weight) - data.weight_kg) / denom * 100 if denom else 0.0
             shown_progress = max(0.0, min(100.0, raw_progress))
-            start_label = f"Start {float(start_weight):.1f} kg"
+            start_label = f"Start {fmt_mass(float(start_weight), data.profile, 1)}"
             if start_date is not None:
                 start_label += f" · {start_date.strftime('%d %b %Y')}"
             progress_html = f"""
               <div class='journey-row'><span>{escape(start_label)}</span><b>{raw_progress:.0f}% complete</b></div>
               <div class='journey-track'><i style='width:{shown_progress:.1f}%'></i></div>
-              <div class='journey-foot'><span>{max(0.0,float(start_weight)-data.weight_kg):.1f} kg changed</span><span>{max(0.0,data.weight_kg-goal):.1f} kg remaining</span></div>
+              <div class='journey-foot'><span>{fmt_mass(max(0.0,float(start_weight)-data.weight_kg),data.profile,1)} changed</span><span>{fmt_mass(max(0.0,data.weight_kg-goal),data.profile,1)} remaining</span></div>
             """
         else:
             progress_html = f"""
               <div class='goal-distance'>
-                <div class='goal-end'><b>{goal:.1f}</b><span>Goal kg</span></div>
+                <div class='goal-end'><b>{display_mass_value(goal,data.profile):.1f}</b><span>Goal {mu}</span></div>
                 <div class='goal-arrow'><span></span><i>Current → Goal</i></div>
-                <div class='goal-end current'><b>{data.weight_kg:.1f}</b><span>Current kg</span></div>
+                <div class='goal-end current'><b>{display_mass_value(data.weight_kg,data.profile):.1f}</b><span>Current {mu}</span></div>
               </div>
             """
 
@@ -1085,9 +1368,9 @@ def render_report_html(data: ReportData, standalone: bool = True) -> str:
         goal_summary = "No weight goal"
         progress_html = f"""
           <div class='goal-distance'>
-            <div class='goal-end'><b>{threshold:.1f}</b><span>BMI {data.bands.bmi[1]:.1f} kg</span></div>
+            <div class='goal-end'><b>{display_mass_value(threshold,data.profile):.1f}</b><span>BMI {data.bands.bmi[1]:.1f} {mu}</span></div>
             <div class='goal-arrow'><span></span><i>Reference boundary</i></div>
-            <div class='goal-end current'><b>{data.weight_kg:.1f}</b><span>Current kg</span></div>
+            <div class='goal-end current'><b>{display_mass_value(data.weight_kg,data.profile):.1f}</b><span>Current {mu}</span></div>
           </div>
         """
         goal_projection = "<div class='goal-proj'>Reference boundary shown; not a personal target.</div>"
@@ -1102,28 +1385,30 @@ def render_report_html(data: ReportData, standalone: bool = True) -> str:
     if data.bmr is not None: param_items.append(("BMR", f"{data.bmr:,.0f} kcal/day"))
     if data.metabolic_age is not None: param_items.append(("Metabolic age", f"{data.metabolic_age:.0f} y"))
     if data.vascular_age is not None: param_items.append(("Vascular age", f"{data.vascular_age:.0f} y"))
-    if data.icw_kg is not None and data.ecw_kg is not None: param_items.append(("ICW / ECW", f"{data.icw_kg:.0f} / {data.ecw_kg:.0f} kg"))
+    if data.icw_kg is not None and data.ecw_kg is not None: param_items.append(("ICW / ECW", f"{display_mass_value(data.icw_kg,data.profile):.0f} / {display_mass_value(data.ecw_kg,data.profile):.0f} {mu}"))
     if data.ecw_tbw_pct is not None: param_items.append(("ECW/TBW", f"{data.ecw_tbw_pct:.1f}%*"))
     if data.visceral_fat is not None: param_items.append(("Visceral fat", f"{data.visceral_fat:.1f} / 20"))
+    if data.pwv_mps is not None: param_items.append(("Pulse wave velocity", f"{data.pwv_mps:.1f} m/s"))
+    if data.scan_heart_rate_bpm is not None: param_items.append(("Scan heart rate", f"{data.scan_heart_rate_bpm:.0f} bpm"))
     params_html = "".join(f"<div class='param-row'><span>{escape(k)}</span><b>{escape(v)}</b></div>" for k,v in param_items)
     if not params_html:
         params_html = "<div class='mini-note'>No additional Body Scan parameters were available in this export.</div>"
 
     id_line = f"<span class='patient-id'>ID {escape(profile_id)}</span>" if profile_id else ""
 
-    kpi_delta_weight = signed(d_w, 2, " kg") if d_w is not None else "No prior day"
+    kpi_delta_weight = fmt_mass_delta(d_w, data.profile, 2) if d_w is not None else "No prior day"
     kpi_delta_bf = signed(d_bf, 1, " pp") if d_bf is not None else "No prior day"
-    kpi_delta_mm = signed(d_mm, 2, " kg") if d_mm is not None else "No prior day"
+    kpi_delta_mm = fmt_mass_delta(d_mm, data.profile, 2) if d_mm is not None else "No prior day"
     kpi_delta_vis = signed(d_vis, 1, "") if d_vis is not None else "Ref 0–5"
 
-    snapshot_prev_value = signed(d_w,2,' kg') if d_w is not None else "No prior day"
+    snapshot_prev_value = fmt_mass_delta(d_w,data.profile,2) if d_w is not None else "No prior day"
     snapshot_prev_sub = f"Body fat {signed(d_bf,1,' pp')} · {prev_date}" if d_w is not None else "Need another measured day"
 
     def period_snapshot(trend, dw, dbf, dmm):
         if not trend or dw is None:
             return "Insufficient history", "No suitable baseline scan"
         span = int(trend.get("span_days", 0))
-        return signed(dw,1,' kg'), f"BF {signed(dbf,1,' pp')} · Muscle {signed(dmm,1,' kg')} · {span}d span"
+        return fmt_mass_delta(dw,data.profile,1), f"BF {signed(dbf,1,' pp')} · Muscle {fmt_mass_delta(dmm,data.profile,1)} · {span}d span"
 
     snapshot_30_value, snapshot_30_sub = period_snapshot(t30, t30_w, t30_bf, t30_mm)
     snapshot_90_value, snapshot_90_sub = period_snapshot(t90, t90_w, t90_bf, t90_mm)
@@ -1131,7 +1416,7 @@ def render_report_html(data: ReportData, standalone: bool = True) -> str:
     if target_bf is not None:
         snapshot_goal_sub = f"Body-fat goal {float(target_bf):.1f}%"
     elif start_weight is not None and goal is not None:
-        snapshot_goal_sub = f"Started at {float(start_weight):.1f} kg"
+        snapshot_goal_sub = f"Started at {fmt_mass(float(start_weight),data.profile,1)}"
     else:
         snapshot_goal_sub = "Profile-defined goal" if goal is not None else "Reference boundary only"
 
@@ -1139,10 +1424,10 @@ def render_report_html(data: ReportData, standalone: bool = True) -> str:
         if not trend or dw is None:
             return "<div class='trend-empty'>Insufficient history for this interval.</div>"
         rows = [
-            ("Weight", signed(dw,2," kg")),
+            ("Weight", fmt_mass_delta(dw,data.profile,2)),
             ("Body fat", signed(dbf,1," pp")),
-            ("Fat mass", signed(dfm,2," kg")),
-            ("Muscle mass", signed(dmm,2," kg")),
+            ("Fat mass", fmt_mass_delta(dfm,data.profile,2)),
+            ("Muscle mass", fmt_mass_delta(dmm,data.profile,2)),
         ]
         return "".join(f"<div class='trend-row'><span>{k}</span><b>{v}</b></div>" for k,v in rows)
 
@@ -1151,8 +1436,10 @@ def render_report_html(data: ReportData, standalone: bool = True) -> str:
     trend30_span = f"{int(t30.get('span_days',0))}d span" if t30 else "No suitable baseline"
     trend90_span = f"{int(t90.get('span_days',0))}d span" if t90 else "No suitable baseline"
     rate = diag.get("weight_rate_per_week")
-    rate_text = signed(rate,2," kg/week") if rate is not None else "Insufficient history"
+    rate_text = (fmt_mass_delta(rate,data.profile,2) + "/week") if rate is not None else "Insufficient history"
     consistency_label = escape(str(consistency.get("label","No data")))
+    quality_label = escape(str(scan_quality.get("label","No data")))
+    quality_cls = str(scan_quality.get("class","neutral"))
     consistency_cls = str(consistency.get("class","neutral"))
     consistency_med = consistency.get("median_deviation_hours")
     consistency_max = consistency.get("max_deviation_hours")
@@ -1224,7 +1511,7 @@ html,body {{ margin:0; padding:0; background:#eef3f6; font-family:Arial,Helvetic
 .seg-panel-body {{ height:36.5mm; display:grid; grid-template-columns:1fr 27mm 1fr; align-items:center; padding:0 3.2mm; }}
 .seg-side {{ height:100%; display:flex; flex-direction:column; justify-content:space-around; padding:4.4mm 0 2.3mm; }}
 .seg-readout {{ font-size:5.0pt; color:#537080; line-height:1.08; }} .seg-readout.right {{ text-align:right; }} .seg-readout.left {{ text-align:left; }}
-.seg-readout b {{ display:block; font-size:7.3pt; color:#00628f; margin-top:.25mm; }} .seg-panel.fat .seg-readout b {{ color:#a36b05; }}
+.seg-readout b {{ display:block; font-size:7.3pt; color:#00628f; margin-top:.25mm; }} .seg-panel.fat .seg-readout b {{ color:#a36b05; }} .seg-ffm {{display:block;font-size:3.45pt;color:#6b7f88;line-height:1.05;margin-top:.18mm;}}
 .seg-name {{ font-size:4.55pt; font-weight:800; color:#607784; }}
 .seg-delta {{ display:block; margin-top:.35mm; font-size:4.45pt; font-weight:800; letter-spacing:.02em; }}
 .seg-delta.favourable {{ color:#2b8b55; }} .seg-delta.attention {{ color:#b56b24; }} .seg-delta.neutral-delta {{ color:#87959c; font-weight:600; }}
@@ -1327,7 +1614,7 @@ html,body {{ margin:0; padding:0; background:#eef3f6; font-family:Arial,Helvetic
     </div>
     <div class='patient'>
       <div class='patient-name'>{escape(name)}</div>
-      <div class='patient-meta'>{id_line}{escape(sex)} · {age_text} years · {data.profile.height_m*100:.0f} cm</div>
+      <div class='patient-meta'>{id_line}{escape(sex)} · {age_text} years · {height_text}</div>
       <div class='scan-meta'>Scan {scan_date} · {scan_time} &nbsp; | &nbsp; Segmental {seg_date}</div>
     </div>
   </div>
@@ -1335,15 +1622,15 @@ html,body {{ margin:0; padding:0; background:#eef3f6; font-family:Arial,Helvetic
   <div class='content'>
     <div class='kpis'>
       <div class='kpi'>
-        <div class='kpi-label'>WEIGHT</div><div class='kpi-value'>{data.weight_kg:.2f} kg</div><i class='kpi-status {_dot_class(weight_cls)}'></i>
+        <div class='kpi-label'>WEIGHT</div><div class='kpi-value'>{fmt_mass(data.weight_kg,data.profile,2)}</div><i class='kpi-status {_dot_class(weight_cls)}'></i>
         <div class='kpi-foot'><span class='kpi-delta'>{kpi_delta_weight}</span><span>BMI {data.bmi:.1f}</span></div>
       </div>
       <div class='kpi'>
         <div class='kpi-label'>BODY FAT</div><div class='kpi-value'>{data.body_fat_pct:.1f}%</div><i class='kpi-status {_dot_class(bf_cls)}'></i>
-        <div class='kpi-foot'><span class='kpi-delta'>{kpi_delta_bf}</span><span>{data.fat_mass_kg:.2f} kg</span></div>
+        <div class='kpi-foot'><span class='kpi-delta'>{kpi_delta_bf}</span><span>{fmt_mass(data.fat_mass_kg,data.profile,2)}</span></div>
       </div>
       <div class='kpi'>
-        <div class='kpi-label'>MUSCLE MASS</div><div class='kpi-value'>{data.muscle_mass_kg:.2f} kg</div><i class='kpi-status {_dot_class(mm_cls)}'></i>
+        <div class='kpi-label'>MUSCLE MASS</div><div class='kpi-value'>{fmt_mass(data.muscle_mass_kg,data.profile,2)}</div><i class='kpi-status {_dot_class(mm_cls)}'></i>
         <div class='kpi-foot'><span class='kpi-delta'>{kpi_delta_mm}</span><span>{data.muscle_pct:.1f}%</span></div>
       </div>
       <div class='kpi'>
@@ -1361,15 +1648,15 @@ html,body {{ margin:0; padding:0; background:#eef3f6; font-family:Arial,Helvetic
 
     <div class='two-col'>
       <div class='card'><div class='section-title'>BODY COMPOSITION ANALYSIS</div><div class='comp-body'>
-        <div class='comp-row'><span>Total Body Water</span><b>{data.water_kg:.2f} kg</b><small>{data.water_pct:.1f}%</small></div>
-        <div class='comp-row'><span>Fat-Free Mass</span><b>{data.fat_free_mass_kg:.2f} kg</b><small>Weight − fat mass</small></div>
-        <div class='comp-row'><span>Muscle Mass</span><b>{data.muscle_mass_kg:.2f} kg</b><small>{data.muscle_pct:.1f}%</small></div>
-        <div class='comp-row'><span>Bone Mass</span><b>{data.bone_mass_kg:.2f} kg</b><small>{data.bone_pct:.1f}%</small></div>
-        <div class='comp-row'><span>Body Fat Mass</span><b>{data.fat_mass_kg:.2f} kg</b><small>{data.body_fat_pct:.1f}%</small></div>
-        <div class='comp-row'><span>Weight</span><b>{data.weight_kg:.2f} kg</b><small>BMI {data.bmi:.1f}</small></div>
+        <div class='comp-row'><span>Total Body Water</span><b>{fmt_mass(data.water_kg,data.profile,2)}</b><small>{data.water_pct:.1f}%</small></div>
+        <div class='comp-row'><span>Fat-Free Mass</span><b>{fmt_mass(data.fat_free_mass_kg,data.profile,2)}</b><small>Weight − fat mass</small></div>
+        <div class='comp-row'><span>Muscle Mass</span><b>{fmt_mass(data.muscle_mass_kg,data.profile,2)}</b><small>{data.muscle_pct:.1f}%</small></div>
+        <div class='comp-row'><span>Bone Mass</span><b>{fmt_mass(data.bone_mass_kg,data.profile,2)}</b><small>{data.bone_pct:.1f}%</small></div>
+        <div class='comp-row'><span>Body Fat Mass</span><b>{fmt_mass(data.fat_mass_kg,data.profile,2)}</b><small>{data.body_fat_pct:.1f}%</small></div>
+        <div class='comp-row'><span>Weight</span><b>{fmt_mass(data.weight_kg,data.profile,2)}</b><small>BMI {data.bmi:.1f}</small></div>
       </div></div>
       <div class='card'><div class='section-title'>MUSCLE · FAT / OBESITY ANALYSIS</div><div class='bars'>
-        {_bar(data.weight_kg,(bmi_lo_w,bmi_hi_w),(max(35,bmi_lo_w*0.65), bmi_hi_w*1.45),'Weight')}
+        {_bar(display_mass_value(data.weight_kg,data.profile),(display_mass_value(bmi_lo_w,data.profile),display_mass_value(bmi_hi_w,data.profile)),(display_mass_value(max(35,bmi_lo_w*0.65),data.profile),display_mass_value(bmi_hi_w*1.45,data.profile)),'Weight',mu)}
         {_bar(data.muscle_pct,data.bands.muscle_pct,(45,95),'Muscle %')}
         {_bar(data.body_fat_pct,data.bands.body_fat,(5,45),'Body fat %')}
         {_bar(data.bmi,data.bands.bmi,(14,36),'BMI')}
@@ -1407,14 +1694,14 @@ html,body {{ margin:0; padding:0; background:#eef3f6; font-family:Arial,Helvetic
         <div class='trend-head' style='margin-top:.8mm'><b>90-DAY TREND</b><small>{trend90_span}</small></div>
         {trend90_html}
         <div class='quality-box'>
-          <div class='quality-top'><b>Measurement timing</b><span class='quality-pill {consistency_cls if consistency_cls!='good' else ''}'>{consistency_label}</span></div>
-          <div class='quality-detail'>{escape(consistency_detail)}</div>
+          <div class='quality-top'><b>Comparison quality</b><span class='quality-pill {quality_cls if quality_cls!='good' else ''}'>{quality_label}</span></div>
+          <div class='quality-detail'>Measurement timing: {consistency_label} · {escape(consistency_detail)}</div>
           <div class='rate-row'><span>Average weight rate</span><b>{rate_text}</b></div>
         </div>
       </div></div>
 
       <div class='card bottom-card'><div class='section-title'>GOAL & INTERPRETATION</div><div class='goal-inner'>
-        <div class='goal-top'><div><div class='snap-label'>PERSONAL GOAL</div><div class='goal-number'>{f'{goal:.1f} kg' if goal is not None else 'Not supplied'}</div></div><div class='goal-remaining'>{goal_summary}</div></div>
+        <div class='goal-top'><div><div class='snap-label'>PERSONAL GOAL</div><div class='goal-number'>{fmt_mass(goal,data.profile,1) if goal is not None else 'Not supplied'}</div></div><div class='goal-remaining'>{goal_summary}</div></div>
         {progress_html}
         {target_bf_html}
         {goal_projection}

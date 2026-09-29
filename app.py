@@ -8,6 +8,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from report_engine import (
+    ENGINE_BUILD,
     Profile,
     ReferenceBands,
     build_report_data,
@@ -32,16 +33,22 @@ st.markdown(
 )
 
 st.title("Withings → InBody-style Body Composition Report")
-st.caption("Build V7")
+st.caption("Report Engine V8.0")
 st.markdown(
     "<div class='report-note'>Upload the original Withings export ZIP (recommended) or weight.csv + other.csv. "
-    "The report uses the latest complete whole-body scan and the latest self-contained segmental snapshot; it never invents missing history values.</div>",
+    "V8 normalizes Metric/US source units internally, adds segmental FFM, PWV and scan heart rate when available, and keeps import units independent from report display units.</div>",
     unsafe_allow_html=True,
 )
 
 with st.sidebar:
     st.header("1. Withings export")
     source_mode = st.radio("Import method", ["Withings ZIP", "Two CSV files"], horizontal=True)
+    with st.expander("Advanced import settings", expanded=False):
+        source_unit_override_ui = st.selectbox(
+            "Source mass unit override", ["Auto-detect", "kg", "lb"], index=0,
+            help="Leave on Auto-detect for normal Withings exports. Use kg/lb only when a non-standard export omits unit labels."
+        )
+    source_unit_override = None if source_unit_override_ui == "Auto-detect" else source_unit_override_ui
     weight_df = other_df = None
     import_meta = {}
     load_error = None
@@ -50,15 +57,23 @@ with st.sidebar:
         up = st.file_uploader("Withings export ZIP", type=["zip"])
         if up is not None:
             try:
-                weight_df, other_df, import_meta = load_withings_zip(up.getvalue())
+                weight_df, other_df, import_meta = load_withings_zip(up.getvalue(), source_mass_unit_override=source_unit_override)
             except Exception as exc:
                 load_error = str(exc)
     else:
         w = st.file_uploader("weight.csv", type=["csv"], key="weight")
         o = st.file_uploader("other.csv", type=["csv"], key="other")
+        with st.expander("Optional Body Scan files", expanded=False):
+            pwv = st.file_uploader("pwv.csv (optional)", type=["csv"], key="pwv")
+            bp = st.file_uploader("bp.csv (optional, used for scan heart rate)", type=["csv"], key="bp")
         if w is not None and o is not None:
             try:
-                weight_df, other_df, import_meta = load_withings_csvs(w.getvalue(), o.getvalue())
+                weight_df, other_df, import_meta = load_withings_csvs(
+                    w.getvalue(), o.getvalue(),
+                    pwv.getvalue() if pwv is not None else None,
+                    bp.getvalue() if bp is not None else None,
+                    source_mass_unit_override=source_unit_override,
+                )
             except Exception as exc:
                 load_error = str(exc)
 
@@ -69,7 +84,17 @@ with st.sidebar:
     name = st.text_input("Name", value="")
     profile_id = st.text_input("Client / Profile ID", value="", help="Optional identifier shown in the report header.")
     sex = st.selectbox("Sex", ["Male", "Female"])
-    height_cm = st.number_input("Height (cm)", min_value=120.0, max_value=220.0, value=182.0, step=0.5)
+    display_units = st.selectbox("Report units", ["Metric", "US Customary"], index=0, help="Independent of the units used in the imported Withings ZIP.")
+    if display_units == "Metric":
+        height_cm = st.number_input("Height (cm)", min_value=120.0, max_value=220.0, value=182.0, step=0.5)
+        height_m = float(height_cm) / 100.0
+    else:
+        hc1, hc2 = st.columns(2)
+        with hc1:
+            height_ft = st.number_input("Height (ft)", min_value=3, max_value=7, value=5, step=1)
+        with hc2:
+            height_in = st.number_input("Height (in)", min_value=0.0, max_value=11.9, value=11.7, step=0.1)
+        height_m = (float(height_ft) * 12.0 + float(height_in)) * 0.0254
     use_dob = st.checkbox("Use date of birth", value=False)
     if use_dob:
         dob = st.date_input("Date of birth", value=date(1982, 1, 1), min_value=date(1920,1,1), max_value=date.today())
@@ -79,7 +104,12 @@ with st.sidebar:
         age_override = int(st.number_input("Age", min_value=18, max_value=100, value=43, step=1))
 
     use_goal = st.checkbox("Show personal goal", value=True)
-    goal = st.number_input("Goal weight (kg)", min_value=35.0, max_value=200.0, value=82.0, step=0.5, disabled=not use_goal)
+    if display_units == "Metric":
+        goal_display = st.number_input("Goal weight (kg)", min_value=35.0, max_value=200.0, value=82.0, step=0.5, disabled=not use_goal)
+        goal_kg = float(goal_display) if use_goal else None
+    else:
+        goal_display = st.number_input("Goal weight (lb)", min_value=77.0, max_value=440.0, value=180.8, step=1.0, disabled=not use_goal)
+        goal_kg = float(goal_display) / 2.20462262185 if use_goal else None
 
     use_bf_goal = st.checkbox("Add target body fat %", value=False)
     target_bf = st.number_input(
@@ -93,10 +123,18 @@ with st.sidebar:
         journey_start_date = st.date_input(
             "Journey start date", value=date.today()-timedelta(days=90), min_value=date(2000,1,1), max_value=date.today()
         )
-        starting_weight = st.number_input(
-            "Starting weight (kg)", min_value=35.0, max_value=250.0, value=95.0, step=0.1,
-            help="Used only for the progress calculation shown in the report.",
-        )
+        if display_units == "Metric":
+            starting_weight_display = st.number_input(
+                "Starting weight (kg)", min_value=35.0, max_value=250.0, value=95.0, step=0.1,
+                help="Used only for the progress calculation shown in the report.",
+            )
+            starting_weight = float(starting_weight_display)
+        else:
+            starting_weight_display = st.number_input(
+                "Starting weight (lb)", min_value=77.0, max_value=550.0, value=209.4, step=0.5,
+                help="Used only for the progress calculation shown in the report.",
+            )
+            starting_weight = float(starting_weight_display) / 2.20462262185
     else:
         journey_start_date = None
         starting_weight = None
@@ -126,6 +164,7 @@ with st.sidebar:
         bmi = st.slider("BMI", 14.0, 35.0, base.bmi, 0.1)
 
     bands = ReferenceBands(body_fat=bf, muscle_pct=mm, water_pct=water, bone_pct=bone, visceral_fat=visceral, bmi=bmi)
+    st.caption(f"Engine build: {ENGINE_BUILD}")
 
 if weight_df is None or other_df is None:
     st.info("Upload the Withings export to generate the report.")
@@ -145,16 +184,17 @@ if weight_df is None or other_df is None:
 profile_kwargs = {
     "name": name or "Profile",
     "sex": sex,
-    "height_m": float(height_cm) / 100.0,
+    "height_m": float(height_m),
     "birth_date": dob,
     "age_override": age_override,
-    "goal_weight_kg": float(goal) if use_goal else None,
+    "goal_weight_kg": goal_kg,
     "history_daily_rule": history_daily_rule,
     "history_points": int(history_points),
     "profile_id": profile_id or None,
     "journey_start_date": journey_start_date,
     "starting_weight_kg": float(starting_weight) if starting_weight is not None else None,
     "target_body_fat_pct": float(target_bf) if use_bf_goal else None,
+    "display_units": display_units,
 }
 
 # Guard against a partial GitHub deployment where app.py was updated but
@@ -164,7 +204,7 @@ profile_params = set(inspect.signature(Profile).parameters)
 unsupported_profile_fields = [k for k in profile_kwargs if k not in profile_params]
 if unsupported_profile_fields:
     st.error(
-        "Deployment file mismatch: app.py is V5+ but report_engine.py is older. "
+        "Deployment file mismatch: app.py and report_engine.py are from different builds. "
         "Replace report_engine.py from the same package, commit it, then reboot the Streamlit app. "
         f"Missing Profile fields: {', '.join(unsupported_profile_fields)}"
     )
@@ -196,6 +236,7 @@ with st.expander("Data diagnostics", expanded=False):
     d2.metric("other.csv records", import_meta.get("other_records", 0))
     d3.metric("Segment positions detected", report.diagnostics.get("segment_complete_positions", 0))
     st.write("Detected segment positions:", import_meta.get("positions", []))
+    st.write("Import normalization:", import_meta.get("source_mass_columns", {}))
     st.write("Detected other.csv metric types:")
     st.code("\n".join(import_meta.get("other_types", [])) or "No metric types detected")
     st.caption("If a Withings export changes a metric label, this list makes the mismatch visible instead of silently inventing a value.")

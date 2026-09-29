@@ -216,3 +216,87 @@ def test_v7_hides_unavailable_bmr_and_assessment_has_values():
     assert "<span>BMR</span><b>-</b>" not in html
     assert "assess-value" in html
     assert f"{r.body_fat_pct:.1f}%" in html
+
+import io
+import zipfile
+from report_engine import load_withings_zip, LB_PER_KG, ENGINE_BUILD
+
+
+def _make_us_zip():
+    # Same physical values as a ~91.94 kg scan, exported in lb.
+    weight = pd.DataFrame([
+        ["2026-09-21 07:00:00", 92.60*LB_PER_KG, 20.08*LB_PER_KG, 3.50*LB_PER_KG, 69.03*LB_PER_KG, 49.39*LB_PER_KG],
+        ["2026-09-22 10:26:54", 91.94*LB_PER_KG, 18.43*LB_PER_KG, 3.53*LB_PER_KG, 69.98*LB_PER_KG, 49.28*LB_PER_KG],
+    ], columns=["Date","Weight (lb)","Fat mass (lb)","Bone mass (lb)","Muscle mass (lb)","Hydration (lb)"])
+    other_rows=[]
+    for pos,(m,f,ffm) in {
+        "Left Arm":(4.6,.7,5.0),"Right Arm":(4.8,.7,5.2),"Torso":(36.7,12.2,38.6),"Left leg":(12.0,2.6,12.6),"Right leg":(11.8,2.9,12.5)
+    }.items():
+        other_rows += [
+            ["Muscle Mass for segments","2026-09-20 10:10:00",m*LB_PER_KG,"lb",pos],
+            ["Fat Mass for segments in mass unit","2026-09-20 10:10:00",f*LB_PER_KG,"lb",pos],
+            ["Fat Free Mass for segments","2026-09-20 10:10:00",ffm*LB_PER_KG,"lb",pos],
+        ]
+    other_rows += [
+        ["Visceral fat","2026-09-22 10:26:54",3.7,"",""],
+        ["Vascular age","2026-09-22 10:26:54",46,"year",""],
+        ["ICW","2026-09-22 10:26:54",31*LB_PER_KG,"lb",""],
+        ["ECW","2026-09-22 10:26:54",19*LB_PER_KG,"lb",""],
+    ]
+    other=pd.DataFrame(other_rows,columns=["type","date","value","unit","position"])
+    pwv=pd.DataFrame([["2026-09-22 07:02:59",7.5]],columns=["date","value"])
+    bp=pd.DataFrame([["2026-09-22 10:26:54",103,None,None,None]],columns=["Date","Heart rate","Systolic","Diastolic","Comments"])
+    buf=io.BytesIO()
+    with zipfile.ZipFile(buf,'w',zipfile.ZIP_DEFLATED) as z:
+        z.writestr('weight.csv',weight.to_csv(index=False))
+        z.writestr('other.csv',other.to_csv(index=False))
+        z.writestr('pwv.csv',pwv.to_csv(index=False))
+        z.writestr('bp.csv',bp.to_csv(index=False))
+    return buf.getvalue()
+
+
+def test_v8_us_source_normalizes_to_metric_internal():
+    w,o,meta=load_withings_zip(_make_us_zip())
+    latest=w.sort_values('Date').iloc[-1]
+    assert abs(float(latest['Weight (kg)'])-91.94)<1e-6
+    assert abs(float(latest['Muscle mass (kg)'])-69.98)<1e-6
+    p=Profile('US Source','Male',1.82,age_override=43,goal_weight_kg=82.0,display_units='Metric')
+    r=build_report_data(w,o,p,diagnostics=meta)
+    assert abs(r.segments['Torso'].ffm_kg-38.6)<1e-6
+    assert r.pwv_mps==7.5
+    assert r.scan_heart_rate_bpm==103
+    html=render_report_html(r)
+    assert '91.94 kg' in html
+    assert 'Pulse wave velocity' in html
+    assert '103 bpm' in html
+    assert 'FFM 38.6 kg' in html
+
+
+def test_v8_metric_internal_can_render_us_without_kg_leakage():
+    w,o,meta=load_withings_zip(_make_us_zip())
+    p=Profile('US Report','Male',1.82,age_override=43,goal_weight_kg=82.0,display_units='US Customary')
+    r=build_report_data(w,o,p,diagnostics=meta)
+    html=render_report_html(r)
+    assert '202.69 lb' in html
+    assert '5 ft 11.7 in' in html
+    assert 'FFM 85.1 lb' in html
+    assert ' kg' not in html
+    assert 'pp' in html
+    assert '7.5 m/s' in html
+
+
+def test_v8_source_override_handles_unitless_mass_headers():
+    weight=pd.DataFrame([["2026-09-22 10:26:54",202.69,40.63,7.78,154.28,108.64]],columns=["Date","Weight","Fat mass","Bone mass","Muscle mass","Hydration"])
+    other=pd.DataFrame([],columns=["type","date","value","unit","position"])
+    w,o,meta=normalize_frames(weight,other,{},source_mass_unit_override='lb')
+    assert abs(float(w.iloc[0]['Weight (kg)'])-91.94)<0.05
+    assert meta['internal_mass_unit']=='kg'
+
+
+def test_v8_quality_engine_and_build_id():
+    w,o,meta=extended_frames()
+    p=Profile('Sample','Male',1.82,age_override=43,goal_weight_kg=82.0)
+    r=build_report_data(w,o,p,diagnostics=meta)
+    assert 'scan_quality' in r.diagnostics
+    assert r.diagnostics['scan_quality']['label'] in {'Good','Variable','Limited data'}
+    assert ENGINE_BUILD == 'V8.0'

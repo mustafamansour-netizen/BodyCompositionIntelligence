@@ -1,62 +1,132 @@
-# Body Composition Intelligence — V7
+# Body Composition Intelligence — Report Engine V8.0
 
-A Streamlit app that imports a Withings export (`weight.csv` + `other.csv`, directly or inside the original Withings ZIP) and produces a one-page body-composition report with PDF export.
+A Streamlit app that imports a Withings export ZIP (recommended) or the core CSV files and produces a one-page body-composition report with HTML/PDF export.
 
-## V7 focus
+V8.0 finishes the report engine around three goals:
 
-V7 keeps the V6.2 visual structure but improves longitudinal interpretation, data quality, goal tracking, and print readability while keeping the report generic for any user.
+1. **Universal Withings import normalization**
+2. **Independent Metric / US Customary report units**
+3. **Better use of Body Scan data and comparison quality**
 
-### New in V7
+## New in V8.0
 
-- Header subtitle simplified to **Withings Body Scan** only.
-- 30-day and 90-day trend summaries using the profile-selected daily history rule.
-- Actual comparison span is retained internally and shown in the report (for example, a 29-day available interval for the 30-day trend).
-- Average weight-change rate in kg/week when enough longitudinal data is available.
-- Measurement-time consistency indicator based on recent complete scans. This is a data-quality cue, not a clinical diagnosis.
-- Optional journey start date + starting weight.
-- Real goal progress percentage when a starting weight and goal weight are provided.
-- Optional target body-fat percentage.
-- Current Assessment now shows the actual current value beside each reference status.
-- Unavailable Body Scan parameters are hidden instead of displaying a dash.
-- Segmental changes are described as **observed** changes and include a reminder to confirm regional changes across repeated scans.
-- Segmental typography and body scale refined for print readability.
-- History remains responsive for 6 / 8 / 10 / 12 measured days.
-- PDF export remains supported through WeasyPrint.
+### Universal source-unit normalization
+
+The importer no longer assumes that `weight.csv` is metric.
+
+It detects explicit mass units from the export headers and normalizes body-mass values internally to **kg**. Supported source labels include common kg/lb variants such as:
+
+- `Weight (kg)` / `Weight (lb)` / `Weight (lbs)`
+- Fat mass
+- Bone mass
+- Muscle mass
+- Hydration / body-water mass
+
+Mass-valued rows from `other.csv` are also normalized, including:
+
+- segmental muscle mass
+- segmental fat mass
+- segmental fat-free mass
+- ICW / ECW
+
+If a non-standard export omits mass-unit labels, use **Advanced import settings → Source mass unit override** (`kg` or `lb`). Normal Withings exports should remain on **Auto-detect**.
+
+### Import units and report units are independent
+
+The report can display either:
+
+- **Metric** — kg / cm
+- **US Customary** — lb / ft + in
+
+Examples that are supported:
+
+- Metric ZIP → Metric report
+- Metric ZIP → US report
+- US ZIP → Metric report
+- US ZIP → US report
+
+All analytics remain in canonical metric units internally. Conversion happens only at import and presentation boundaries.
+
+PWV stays in **m/s** and heart rate stays in **bpm** in both report-unit modes.
+
+### New Body Scan metrics
+
+V8.0 uses additional Withings export data when available:
+
+- **Segmental Fat-Free Mass (FFM)** for left/right arms, torso and left/right legs
+- **Pulse Wave Velocity (PWV)** from `pwv.csv`
+- **Scan heart rate** from `bp.csv`, matched to the whole-body scan timestamp
+
+Segmental FFM is shown as a secondary value inside the segmental muscle analysis so the one-page report remains readable.
+
+### Comparison-quality logic
+
+V8.0 adds an internal scan-quality layer that considers:
+
+- complete whole-body composition fields
+- complete segmental comparison scans
+- plausible composition values
+- recent measurement-time consistency
+- unusually large short-term body-water shifts
+- nearby BIA Error records for diagnostics without inventing undocumented code meanings
+
+The report exposes a conservative **Comparison quality** cue such as Good / Variable / Limited data. It is a data-quality aid, not a medical accuracy claim.
+
+### Central comparison behavior
+
+- **Headline values:** latest complete whole-body scan
+- **Previous measured day:** previous representative measured day using the selected history rule
+- **Segmental values:** latest complete muscle/fat segmental snapshot
+- **Segmental change:** previous fully complete segmental snapshot only
+- **30-day / 90-day trends:** representative comparison nearest the requested interval, suppressed if insufficient history exists
+- **Monthly medians:** all complete scans; gaps remain gaps and are never interpolated
+
+## History controls
+
+The profile supports:
+
+- Earliest complete scan
+- Latest complete scan
+- Daily median
+
+History display supports 6 / 8 / 10 / 12 measured days.
+
+The recent-history rule affects the compact recent-history panel only. Monthly medians continue to use all complete scans.
+
+## Goals and journey tracking
+
+All goal fields are optional:
+
+- goal weight
+- target body-fat %
+- journey start date
+- starting weight
+
+When start and goal weights are supplied, the report shows real journey progress. Goal body-fat projections remain mathematical projections that assume current fat-free mass is maintained; they are not prescribed targets.
 
 ## Important terminology: `pp`
 
 The report intentionally keeps **pp**, meaning **percentage points**.
 
-Example: if body fat changes from 21.6% to 20.0%, the change is **-1.6 percentage points (-1.6 pp)**. It is not a 1.6% relative reduction. Replacing `pp` with `%` would therefore change the mathematical meaning.
-
-## How the report chooses data
-
-- **Headline values:** latest complete whole-body scan.
-- **History:** one complete scan per measured day according to the selected profile rule:
-  - Earliest complete scan
-  - Latest complete scan
-  - Daily median
-- **12-month monthly medians:** use all complete scans and remain gap-aware; missing months are not interpolated.
-- **Segmental values:** latest self-contained segmental snapshot.
-- **Segmental change:** latest complete segmental snapshot vs the previous fully complete segmental snapshot.
-- **30-day / 90-day trend:** compares the current scan with the available daily representative scan closest to the requested interval, but suppresses the comparison when history is too short to reasonably represent the interval.
-
-## Measurement consistency
-
-The report evaluates recent scan-time consistency from the time of day of recent complete scans. This is meant to help interpret BIA variability. Hydration, meals, exercise, and measurement timing can materially affect short-term BIA readings.
-
-## Goal logic
-
-All goal fields are optional.
-
-- **Goal weight:** profile-defined target.
-- **Journey start date + starting weight:** enables a real progress percentage.
-- **Target body fat %:** shown as a separate user-defined composition goal.
-- The projected body-fat value at goal weight assumes current fat-free mass is maintained. It is a mathematical projection, not a prescribed target.
+Example: body fat falling from 21.6% to 20.0% is a change of **-1.6 percentage points (-1.6 pp)**. It is not a 1.6% relative reduction, so replacing `pp` with `%` would change the mathematical meaning.
 
 ## Withings vs InBody terminology
 
-This is a Withings-derived report. Withings **Muscle Mass** is not proprietary InBody Skeletal Muscle Mass (SMM). The app does not fabricate an InBody Score, SMM, protein, mineral, waist-hip ratio, or other values that are not present in the Withings export.
+This is a Withings-derived report. Withings **Muscle Mass** is not proprietary InBody Skeletal Muscle Mass (SMM). The app does not fabricate an InBody Score, SMM, protein, mineral, waist-hip ratio or other values not present in the Withings export.
+
+## ZIP files used by V8
+
+Required:
+
+- `weight.csv`
+- `other.csv`
+
+Automatically used when present:
+
+- `pwv.csv`
+- `bp.csv`
+
+For manual CSV mode, `pwv.csv` and `bp.csv` can be uploaded optionally.
 
 ## Run locally
 
@@ -67,18 +137,18 @@ pip install -r requirements.txt
 python -m streamlit run app.py
 ```
 
-Then open the local Streamlit URL (normally `http://localhost:8501`).
+Then open the local Streamlit URL, normally `http://localhost:8501`.
 
 ## Streamlit Community Cloud
 
-Keep both files in the repository root:
+Keep these in the repository root:
 
-- `requirements.txt` — Python packages, including `weasyprint`
-- `packages.txt` — Debian system packages required by WeasyPrint
+- `requirements.txt` — Python packages, including WeasyPrint
+- `packages.txt` — Debian system dependencies required by WeasyPrint
 
-After committing dependency changes, reboot the Streamlit app if necessary.
+After committing dependency changes, reboot the Streamlit app if needed.
 
-## Project files
+## GitHub package files
 
 ```text
 app.py
@@ -92,10 +162,23 @@ test_report_engine.py
 
 Preview files are included in the release ZIP for visual comparison but are not required by Streamlit.
 
-## Tests
+## V8.0 acceptance coverage
 
-```bash
-pytest -q
-```
+The automated suite covers the existing V7 behavior plus V8-specific checks for:
 
-V7 package status: **10 tests passing**.
+- kg source normalization
+- lb source normalization
+- unitless source fallback via explicit override
+- US-source → Metric report
+- canonical Metric → US report
+- no `kg` leakage in US report HTML
+- segmental FFM
+- PWV
+- scan heart rate
+- scan-quality diagnostics
+- recent-history rules
+- 6/8/10/12 history behavior
+- 30/90-day trend logic
+- segmental comparison logic
+
+Current package status: **14 tests passing**.
