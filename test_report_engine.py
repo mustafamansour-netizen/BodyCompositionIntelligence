@@ -109,7 +109,7 @@ def test_v6_practitioner_identity_and_change_summary():
     assert "ID MUS-001" in html
     assert "TREND & DATA QUALITY" in html
     assert "Previous measured day" in html
-    assert "9.94 kg to goal" in html
+    assert "9.94 kg remaining" in html
 
 
 def test_previous_day_respects_selected_history_rule():
@@ -299,4 +299,28 @@ def test_v8_quality_engine_and_build_id():
     r=build_report_data(w,o,p,diagnostics=meta)
     assert 'scan_quality' in r.diagnostics
     assert r.diagnostics['scan_quality']['label'] in {'Good','Variable','Limited data'}
-    assert ENGINE_BUILD == 'V8.0'
+    assert ENGINE_BUILD == 'V8.1'
+
+
+def test_v81_goal_fallback_is_distance_only_without_baseline():
+    w,o,meta=extended_frames()
+    p=Profile('Fallback Goal','Male',1.82,age_override=43,goal_weight_kg=82.5)
+    r=build_report_data(w,o,p,diagnostics=meta)
+    html=render_report_html(r)
+    assert 'remaining' in html
+    assert "class='goal-route'" in html
+    assert 'Current → Goal' in html
+    assert 'Add a starting weight to unlock journey progress %.' in html
+    assert "class='journey-track'" not in html
+
+
+def test_v81_starting_weight_unlocks_progress_without_start_date():
+    w,o,meta=extended_frames()
+    p=Profile('Journey Goal','Male',1.82,age_override=43,goal_weight_kg=82.5,starting_weight_kg=95.0,journey_start_date=None)
+    r=build_report_data(w,o,p,diagnostics=meta)
+    html=render_report_html(r)
+    assert '% complete' in html
+    assert "class='journey-track'" in html
+    assert 'Start 95.0 kg' in html
+    assert 'remaining' in html
+    assert "class='goal-route'" not in html

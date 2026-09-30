@@ -1,12 +1,52 @@
-# Body Composition Intelligence — Report Engine V8.0
+# Body Composition Intelligence — Report Engine V8.1
 
 A Streamlit app that imports a Withings export ZIP (recommended) or the core CSV files and produces a one-page body-composition report with HTML/PDF export.
 
-V8.0 finishes the report engine around three goals:
+V8.1 keeps the V8 universal import/report engine and adds a focused goal-tracking UX patch. The core V8 goals remain:
 
 1. **Universal Withings import normalization**
 2. **Independent Metric / US Customary report units**
 3. **Better use of Body Scan data and comparison quality**
+
+## New in V8.1 — goal-progress UX
+
+V8.1 does **not** change the V8 import normalization, unit-conversion, FFM, PWV, heart-rate or scan-quality logic. It refines only how personal goals are configured and presented.
+
+### Goal distance when no journey baseline is supplied
+
+A goal weight by itself no longer looks like a progress tracker. The report shows only:
+
+- Current weight → Goal weight
+- amount **remaining**
+- a note that adding a starting weight unlocks journey progress
+
+No progress percentage is shown unless a starting weight exists.
+
+### Real journey progress from starting weight
+
+**Starting weight alone is sufficient** to calculate journey progress. A start date is optional.
+
+When a starting weight and goal weight are supplied, the report shows:
+
+- starting weight
+- optional journey start date
+- progress percentage
+- progress bar
+- amount moved toward the goal
+- amount remaining
+
+The progress logic works for both weight-loss and weight-gain goals.
+
+### Clearer Streamlit goal controls
+
+The sidebar now separates:
+
+1. Personal goal weight
+2. Journey progress tracking
+3. Optional journey start date
+4. Optional target body-fat %
+
+This makes it clear which fields are required for a real progress calculation.
 
 ## New in V8.0
 
@@ -162,7 +202,7 @@ test_report_engine.py
 
 Preview files are included in the release ZIP for visual comparison but are not required by Streamlit.
 
-## V8.0 acceptance coverage
+## V8.1 acceptance coverage
 
 The automated suite covers the existing V7 behavior plus V8-specific checks for:
 
@@ -176,9 +216,11 @@ The automated suite covers the existing V7 behavior plus V8-specific checks for:
 - PWV
 - scan heart rate
 - scan-quality diagnostics
+- no-baseline goal fallback (distance only; no fake progress %)
+- starting-weight progress without requiring a start date
 - recent-history rules
 - 6/8/10/12 history behavior
 - 30/90-day trend logic
 - segmental comparison logic
 
-Current package status: **14 tests passing**.
+Current package status: **16 tests passing**.

@@ -33,10 +33,10 @@ st.markdown(
 )
 
 st.title("Withings → InBody-style Body Composition Report")
-st.caption("Report Engine V8.0")
+st.caption("Report Engine V8.1")
 st.markdown(
     "<div class='report-note'>Upload the original Withings export ZIP (recommended) or weight.csv + other.csv. "
-    "V8 normalizes Metric/US source units internally, adds segmental FFM, PWV and scan heart rate when available, and keeps import units independent from report display units.</div>",
+    "V8.1 keeps the V8 universal unit/import engine and refines goal tracking so starting weight alone unlocks real progress, while journey date remains optional.</div>",
     unsafe_allow_html=True,
 )
 
@@ -103,6 +103,7 @@ with st.sidebar:
         dob = None
         age_override = int(st.number_input("Age", min_value=18, max_value=100, value=43, step=1))
 
+    st.markdown("#### Goal settings")
     use_goal = st.checkbox("Show personal goal", value=True)
     if display_units == "Metric":
         goal_display = st.number_input("Goal weight (kg)", min_value=35.0, max_value=200.0, value=82.0, step=0.5, disabled=not use_goal)
@@ -111,33 +112,40 @@ with st.sidebar:
         goal_display = st.number_input("Goal weight (lb)", min_value=77.0, max_value=440.0, value=180.8, step=1.0, disabled=not use_goal)
         goal_kg = float(goal_display) / 2.20462262185 if use_goal else None
 
-    use_bf_goal = st.checkbox("Add target body fat %", value=False)
-    target_bf = st.number_input(
-        "Target body fat (%)", min_value=5.0, max_value=50.0, value=15.0, step=0.5,
-        disabled=not use_bf_goal,
-        help="Optional composition target. The report treats this as a user-defined goal, not a prescribed clinical target.",
+    use_journey = st.checkbox(
+        "Track journey progress", value=False, disabled=not use_goal,
+        help="Starting weight is enough to calculate progress %. Journey start date is optional."
     )
-
-    use_journey = st.checkbox("Track journey progress", value=False)
-    if use_journey:
-        journey_start_date = st.date_input(
-            "Journey start date", value=date.today()-timedelta(days=90), min_value=date(2000,1,1), max_value=date.today()
-        )
+    if use_journey and use_goal:
         if display_units == "Metric":
             starting_weight_display = st.number_input(
                 "Starting weight (kg)", min_value=35.0, max_value=250.0, value=95.0, step=0.1,
-                help="Used only for the progress calculation shown in the report.",
+                help="Unlocks real journey progress in the report.",
             )
             starting_weight = float(starting_weight_display)
         else:
             starting_weight_display = st.number_input(
                 "Starting weight (lb)", min_value=77.0, max_value=550.0, value=209.4, step=0.5,
-                help="Used only for the progress calculation shown in the report.",
+                help="Unlocks real journey progress in the report.",
             )
             starting_weight = float(starting_weight_display) / 2.20462262185
+        use_journey_date = st.checkbox("Add journey start date", value=False)
+        if use_journey_date:
+            journey_start_date = st.date_input(
+                "Journey start date", value=date.today()-timedelta(days=90), min_value=date(2000,1,1), max_value=date.today()
+            )
+        else:
+            journey_start_date = None
     else:
         journey_start_date = None
         starting_weight = None
+
+    use_bf_goal = st.checkbox("Set target body fat %", value=False, disabled=not use_goal)
+    target_bf = st.number_input(
+        "Target body fat (%)", min_value=5.0, max_value=50.0, value=15.0, step=0.5,
+        disabled=not (use_goal and use_bf_goal),
+        help="Optional composition target. The report treats this as a user-defined goal, not a prescribed clinical target.",
+    )
 
     st.markdown("#### History display")
     history_daily_rule = st.selectbox(

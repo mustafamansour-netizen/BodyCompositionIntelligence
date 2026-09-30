@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 
-ENGINE_BUILD = "V8.0"
+ENGINE_BUILD = "V8.1"
 
 # -----------------------------
 # Data model
@@ -1335,28 +1335,38 @@ def render_report_html(data: ReportData, standalone: bool = True) -> str:
         projected_fat = goal - data.fat_free_mass_kg
         projected_pct = projected_fat / goal * 100 if goal > 0 else None
         projection_valid = projected_fat >= 0
-        goal_summary = f"{fmt_mass(abs(goal_gap), data.profile, 2)} to goal"
+        goal_summary = f"{fmt_mass(abs(goal_gap), data.profile, 2)} remaining"
 
         progress_html = ""
         if start_weight is not None and not math.isclose(float(start_weight), float(goal)):
-            denom = float(start_weight) - float(goal)
-            raw_progress = (float(start_weight) - data.weight_kg) / denom * 100 if denom else 0.0
+            start_w = float(start_weight)
+            goal_w = float(goal)
+            direction = 1.0 if goal_w > start_w else -1.0
+            total_distance = abs(goal_w - start_w)
+            achieved = (data.weight_kg - start_w) * direction
+            raw_progress = (achieved / total_distance * 100.0) if total_distance else 0.0
             shown_progress = max(0.0, min(100.0, raw_progress))
-            start_label = f"Start {fmt_mass(float(start_weight), data.profile, 1)}"
+            start_label = f"Start {fmt_mass(start_w, data.profile, 1)}"
             if start_date is not None:
                 start_label += f" · {start_date.strftime('%d %b %Y')}"
+            if achieved >= 0:
+                achieved_label = f"{fmt_mass(min(max(0.0, achieved), total_distance),data.profile,1)} toward goal"
+            else:
+                achieved_label = f"{fmt_mass(abs(achieved),data.profile,1)} away from goal"
+            remaining_distance = max(0.0, (goal_w - data.weight_kg) * direction)
             progress_html = f"""
               <div class='journey-row'><span>{escape(start_label)}</span><b>{raw_progress:.0f}% complete</b></div>
               <div class='journey-track'><i style='width:{shown_progress:.1f}%'></i></div>
-              <div class='journey-foot'><span>{fmt_mass(max(0.0,float(start_weight)-data.weight_kg),data.profile,1)} changed</span><span>{fmt_mass(max(0.0,data.weight_kg-goal),data.profile,1)} remaining</span></div>
+              <div class='journey-foot'><span>{escape(achieved_label)}</span><span>{fmt_mass(remaining_distance,data.profile,1)} remaining</span></div>
             """
         else:
             progress_html = f"""
-              <div class='goal-distance'>
-                <div class='goal-end'><b>{display_mass_value(goal,data.profile):.1f}</b><span>Goal {mu}</span></div>
-                <div class='goal-arrow'><span></span><i>Current → Goal</i></div>
-                <div class='goal-end current'><b>{display_mass_value(data.weight_kg,data.profile):.1f}</b><span>Current {mu}</span></div>
+              <div class='goal-route'>
+                <div class='goal-route-end'><span>Current</span><b>{fmt_mass(data.weight_kg,data.profile,1)}</b></div>
+                <div class='goal-route-track'><i>Current → Goal</i></div>
+                <div class='goal-route-end goal'><span>Goal</span><b>{fmt_mass(goal,data.profile,1)}</b></div>
               </div>
+              <div class='goal-route-note'>Add a starting weight to unlock journey progress %.</div>
             """
 
         goal_projection = (
@@ -1583,6 +1593,16 @@ html,body {{ margin:0; padding:0; background:#eef3f6; font-family:Arial,Helvetic
 .goal-top {{ display:flex; justify-content:space-between; align-items:flex-start; }}
 .goal-number {{ font-size:14.5pt; color:#005b8e; font-weight:800; line-height:1; margin-top:.6mm; }}
 .goal-remaining {{ text-align:right; font-size:5.2pt; color:#e17b1d; font-weight:800; padding-top:2mm; }}
+.goal-route {{ display:grid; grid-template-columns:24mm 1fr 24mm; gap:1.8mm; align-items:center; margin:1.4mm 0 .7mm; }}
+.goal-route-end {{ display:flex; flex-direction:column; gap:.15mm; }}
+.goal-route-end.goal {{ text-align:right; align-items:flex-end; }}
+.goal-route-end span {{ font-size:3.75pt; color:#748791; }}
+.goal-route-end b {{ font-size:6.8pt; color:#0a5d87; }}
+.goal-route-track {{ position:relative; height:5mm; text-align:center; }}
+.goal-route-track:before {{ content:''; position:absolute; left:0; right:0; top:1.9mm; height:.8mm; background:#d7e5eb; border-radius:2mm; }}
+.goal-route-track:after {{ content:''; position:absolute; right:0; top:1.25mm; border-top:1mm solid transparent; border-bottom:1mm solid transparent; border-left:1.7mm solid #0a6c99; }}
+.goal-route-track i {{ position:relative; z-index:2; background:#fff; padding:0 .8mm; font-size:3.5pt; color:#71848f; font-style:normal; }}
+.goal-route-note {{ margin-top:.2mm; font-size:3.65pt; color:#7b8c95; }}
 .goal-distance {{ display:grid; grid-template-columns:20mm 1fr 20mm; gap:1.5mm; align-items:center; margin:1.4mm 0 1mm; }}
 .goal-end {{ text-align:left; }} .goal-end.current {{ text-align:right; }}
 .goal-end b {{ display:block; font-size:7pt; color:#0a5d87; }} .goal-end span {{ font-size:3.8pt; color:#748791; }}
